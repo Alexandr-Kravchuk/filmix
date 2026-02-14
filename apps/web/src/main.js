@@ -1,6 +1,7 @@
 import './styles.css';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { toBlobURL } from '@ffmpeg/util';
+import { fetchSource, getApiBaseUrl } from './api.js';
 
 const DEFAULT_SOURCE_URL = 'https://nl201.cdnsqu.com/s/FHwczVImqnkP-n6cpV8rh3tEFBQUFBSld1TUVFUmRCRUdBS0RWb1pBQg.eMCfInpkOUel2UJPaTlFZAZtQ6sG8UHaK0gk-g/paw.patrol.2013.dub.ukr/s05e11_480.mp4';
 const CORE_BASE_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm';
@@ -23,6 +24,9 @@ const elements = {
   status: document.getElementById('status'),
   video: document.getElementById('video'),
   sourceUrl: document.getElementById('source-url'),
+  backendButton: document.getElementById('backend-btn'),
+  bookmarkletLink: document.getElementById('bookmarklet-link'),
+  pasteButton: document.getElementById('paste-btn'),
   playerDataFile: document.getElementById('player-data-file'),
   extractButton: document.getElementById('extract-btn'),
   prepareButton: document.getElementById('prepare-btn'),
@@ -39,7 +43,9 @@ function setStatus(message, isError = false) {
 
 function setBusy(isBusy) {
   elements.prepareButton.disabled = isBusy;
+  elements.backendButton.disabled = isBusy;
   elements.extractButton.disabled = isBusy;
+  elements.pasteButton.disabled = isBusy;
   elements.playerDataFile.disabled = isBusy;
   elements.sourceUrl.disabled = isBusy;
 }
@@ -199,6 +205,11 @@ async function resolveSourceFromPlayerDataText(text, onStatusChange) {
     }
   }
   throw new Error(`Episode s${String(FIXED_SEASON).padStart(2, '0')}e${String(FIXED_EPISODE).padStart(2, '0')} was not found in playlist`);
+}
+
+function buildFilmixBookmarkletHref() {
+  const script = `(async()=>{try{const match=location.pathname.match(/\\/(\\d+)-[^/]+\\.html$/)||location.pathname.match(/\\/(\\d+)(?:\\/)?$/);const postId=(match&&match[1])||new URLSearchParams(location.search).get('post_id')||'';if(!postId){alert('Filmix post_id not found on this page');return;}const body=new URLSearchParams({post_id:postId,showfull:'true'}).toString();const response=await fetch('/api/movies/player-data',{method:'POST',headers:{accept:'application/json, text/plain, */*','content-type':'application/x-www-form-urlencoded; charset=UTF-8','x-requested-with':'XMLHttpRequest'},credentials:'include',body});if(!response.ok){throw new Error('HTTP '+response.status);}const text=await response.text();try{await navigator.clipboard.writeText(text);alert('player-data copied. Open your Pages site and click Paste player-data from clipboard.');}catch(error){const blob=new Blob([text],{type:'application/json'});const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download='player-data-'+postId+'.json';document.body.appendChild(link);link.click();setTimeout(()=>{URL.revokeObjectURL(link.href);link.remove();},500);alert('Clipboard blocked. File downloaded instead.');}}catch(error){alert('player-data request failed: '+(error&&error.message?error.message:error));}})();`;
+  return `javascript:${script}`;
 }
 
 async function getCoreAssets() {
@@ -440,11 +451,63 @@ async function onExtractClick() {
   }
 }
 
+async function onPasteClick() {
+  if (!navigator.clipboard || typeof navigator.clipboard.readText !== 'function') {
+    setStatus('Clipboard API is not available in this browser', true);
+    return;
+  }
+  setBusy(true);
+  setProgress(0);
+  try {
+    setStatus('Reading player-data from clipboard...');
+    const text = await navigator.clipboard.readText();
+    if (!text || !text.trim()) {
+      throw new Error('Clipboard is empty');
+    }
+    const sourceUrl = await resolveSourceFromPlayerDataText(text, (status) => setStatus(status));
+    elements.sourceUrl.value = sourceUrl;
+    setStatus('Source URL refreshed from clipboard');
+  } catch (error) {
+    const message = error && error.message ? error.message : 'Cannot read player-data from clipboard';
+    setStatus(message, true);
+  } finally {
+    setBusy(false);
+    setProgress(0);
+  }
+}
+async function onBackendClick() {
+  setBusy(true);
+  setProgress(0);
+  try {
+    setStatus('Loading source URL from backend...');
+    const payload = await fetchSource();
+    const resolved = String(payload.sourceUrl || payload.playUrl || '').trim();
+    if (!resolved) {
+      throw new Error('Backend returned empty source URL');
+    }
+    const sourceUrl = resolved.startsWith('http://') || resolved.startsWith('https://')
+      ? resolved
+      : new URL(resolved, getApiBaseUrl()).toString();
+    elements.sourceUrl.value = sourceUrl;
+    const origin = payload.origin ? ` (${payload.origin})` : '';
+    setStatus(`Source URL refreshed from backend${origin}`);
+  } catch (error) {
+    const message = error && error.message ? error.message : 'Cannot load source URL from backend';
+    setStatus(message, true);
+  } finally {
+    setBusy(false);
+    setProgress(0);
+  }
+}
+
 function init() {
   elements.sourceUrl.value = DEFAULT_SOURCE_URL;
+  elements.bookmarkletLink.href = buildFilmixBookmarkletHref();
   elements.prepareButton.addEventListener('click', onPrepareClick);
+  elements.backendButton.addEventListener('click', onBackendClick);
   elements.extractButton.addEventListener('click', onExtractClick);
-  setStatus('Click "Prepare English"');
+  elements.pasteButton.addEventListener('click', onPasteClick);
+  setStatus('Refresh URL from backend, then click "Prepare English"');
 }
 
 init();

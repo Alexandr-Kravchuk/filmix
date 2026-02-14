@@ -91,6 +91,10 @@ test('serves show, episode, play and har import', async () => {
   assert.equal(fixedEpisodeResponse.body.season, 1);
   assert.equal(fixedEpisodeResponse.body.episode, 1);
   assert.match(fixedEpisodeResponse.body.playUrl, /^\/proxy\/video\?src=/);
+  assert.equal(fixedEpisodeResponse.body.sourceUrl, 'https://cdn.example/en/s01e01.m3u8');
+  const sourceResponse = await request(app).get('/api/source').expect(200);
+  assert.equal(sourceResponse.body.sourceUrl, 'https://cdn.example/en/s01e01.m3u8');
+  assert.equal(sourceResponse.body.origin, 'catalog');
   const fixedPlayResponse = await request(app).get('/api/play').expect(302);
   assert.match(fixedPlayResponse.headers.location, /^\/proxy\/video\?src=/);
   await request(app)
@@ -147,6 +151,11 @@ test('uses fixed public media url for one-episode mode', async () => {
   });
   const proxyFixedEpisode = await request(appProxy).get('/api/fixed-episode').expect(200);
   assert.equal(proxyFixedEpisode.body.playUrl, `/proxy/video?src=${encodeURIComponent(mediaUrl)}`);
+  assert.equal(proxyFixedEpisode.body.sourceUrl, mediaUrl);
+  assert.equal(proxyFixedEpisode.body.origin, 'fixed-public');
+  const proxySourceResponse = await request(appProxy).get('/api/source').expect(200);
+  assert.equal(proxySourceResponse.body.sourceUrl, mediaUrl);
+  assert.equal(proxySourceResponse.body.origin, 'fixed-public');
   const proxyPlay = await request(appProxy).get('/api/play').expect(302);
   assert.equal(proxyPlay.headers.location, `/proxy/video?src=${encodeURIComponent(mediaUrl)}`);
   const appDirect = createApp({
@@ -167,6 +176,8 @@ test('uses fixed public media url for one-episode mode', async () => {
   });
   const directFixedEpisode = await request(appDirect).get('/api/fixed-episode').expect(200);
   assert.equal(directFixedEpisode.body.playUrl, mediaUrl);
+  assert.equal(directFixedEpisode.body.sourceUrl, mediaUrl);
+  assert.equal(directFixedEpisode.body.origin, 'fixed-public');
   const directPlay = await request(appDirect).get('/api/play').expect(302);
   assert.equal(directPlay.headers.location, mediaUrl);
 });
@@ -225,6 +236,11 @@ test('uses decoded filmix playlist for fixed episode when direct source is not c
     response.body.playUrl,
     `/proxy/video?src=${encodeURIComponent('https://cdn.example/paw/s05e11_480.mp4')}`
   );
+  assert.equal(response.body.sourceUrl, 'https://cdn.example/paw/s05e11_480.mp4');
+  assert.equal(response.body.origin, 'player-data');
+  const sourceResponse = await request(app).get('/api/source').expect(200);
+  assert.equal(sourceResponse.body.sourceUrl, 'https://cdn.example/paw/s05e11_480.mp4');
+  assert.equal(sourceResponse.body.origin, 'player-data');
 });
 test('renders watch page for direct source url', async () => {
   const app = createApp({

@@ -35,3 +35,6 @@ export async function fetchShow() {
 export async function fetchFixedEpisode() {
   return fetchJson('/api/fixed-episode');
 }
+export async function fetchSource() {
+  return fetchJson('/api/source');
+}

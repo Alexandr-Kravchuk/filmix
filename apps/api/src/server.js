@@ -90,6 +90,52 @@ export function createApp(config) {
     }
     return '';
   }
+  async function resolveFixedSourceData() {
+    if (fixedLocalFilePath) {
+      return {
+        sourceUrl: '/media/fixed-episode.mp4',
+        origin: 'fixed-local'
+      };
+    }
+    if (fixedPublicMediaUrl) {
+      return {
+        sourceUrl: fixedPublicMediaUrl,
+        origin: 'fixed-public'
+      };
+    }
+    if (fixedEnglishSource) {
+      return {
+        sourceUrl: fixedEnglishSource,
+        origin: 'fixed-env'
+      };
+    }
+    const playerData = await config.filmixClient.getPlayerData();
+    try {
+      const resolved = await resolveEpisodeSourceFromPlayerData(playerData, {
+        season: fixedSeason,
+        episode: fixedEpisode,
+        preferredQuality: fixedQuality,
+        preferredTranslationPattern,
+        userAgent: config.userAgent,
+        fetchImpl: playlistFetch
+      });
+      return {
+        sourceUrl: resolved.sourceUrl,
+        origin: 'player-data'
+      };
+    } catch {
+    }
+    const catalog = await buildCatalogSnapshot();
+    const data = getEpisodeData(catalog, fixedSeason, fixedEpisode);
+    const source = data.sources.find((item) => item.lang === 'en');
+    if (!source) {
+      throw new Error('English source is not available for fixed episode');
+    }
+    return {
+      sourceUrl: source.sourceUrl,
+      origin: 'catalog'
+    };
+  }
 
   async function sendLocalVideo(filePath, req, res) {
     const fileStat = await stat(filePath);
@@ -187,42 +233,36 @@ export function createApp(config) {
     try {
       const fixedPlayUrl = getFixedPlayUrl();
       if (fixedPlayUrl) {
+        const sourceData = await resolveFixedSourceData();
         res.json({
           season: fixedSeason,
           episode: fixedEpisode,
-          playUrl: fixedPlayUrl
+          playUrl: fixedPlayUrl,
+          sourceUrl: sourceData.sourceUrl,
+          origin: sourceData.origin
         });
         return;
       }
-      const playerData = await config.filmixClient.getPlayerData();
-      try {
-        const resolved = await resolveEpisodeSourceFromPlayerData(playerData, {
-          season: fixedSeason,
-          episode: fixedEpisode,
-          preferredQuality: fixedQuality,
-          preferredTranslationPattern,
-          userAgent: config.userAgent,
-          fetchImpl: playlistFetch
-        });
-        res.json({
-          season: fixedSeason,
-          episode: fixedEpisode,
-          playUrl: toProxyPlayUrl(resolved.sourceUrl)
-        });
-        return;
-      } catch {
-      }
-      const catalog = await buildCatalogSnapshot();
-      const data = getEpisodeData(catalog, fixedSeason, fixedEpisode);
-      const source = data.sources.find((item) => item.lang === 'en');
-      if (!source) {
-        res.status(404).json({ error: 'English source is not available for fixed episode' });
-        return;
-      }
+      const sourceData = await resolveFixedSourceData();
       res.json({
         season: fixedSeason,
         episode: fixedEpisode,
-        playUrl: toProxyPlayUrl(source.sourceUrl)
+        playUrl: toProxyPlayUrl(sourceData.sourceUrl),
+        sourceUrl: sourceData.sourceUrl,
+        origin: sourceData.origin
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+  app.get('/api/source', async (req, res, next) => {
+    try {
+      const sourceData = await resolveFixedSourceData();
+      res.json({
+        season: fixedSeason,
+        episode: fixedEpisode,
+        sourceUrl: sourceData.sourceUrl,
+        origin: sourceData.origin
       });
     } catch (error) {
       next(error);

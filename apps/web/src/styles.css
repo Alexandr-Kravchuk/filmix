@@ -72,6 +72,12 @@ body {
   color: #e6eef9;
   border: 1px solid #486383;
 }
+.link-button {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 .button:disabled {
   opacity: 0.55;
   cursor: not-allowed;

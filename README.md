@@ -88,6 +88,7 @@ If source URL expires, export fresh `player-data` response (`text-*.txt` from Pr
 - `GET /api/health`
 - `GET /api/show`
 - `GET /api/fixed-episode`
+- `GET /api/source`
 - `GET /api/episode?season=1&episode=1`
 - `GET /api/play`
 - `GET /api/play?season=1&episode=1&lang=en`
@@ -95,6 +96,8 @@ If source URL expires, export fresh `player-data` response (`text-*.txt` from Pr
 - `GET /proxy/video-en?src=<encoded_url>`
 - `GET /watch?src=<encoded_url>`
 - `POST /api/admin/import-har` with `Authorization: Bearer <ADMIN_TOKEN>`
+
+`/api/source` is a lightweight endpoint for GitHub Pages mode: it only returns a fresh direct Filmix MP4 URL and does not proxy video bytes.
 
 `/proxy/video-en` downloads source to local cache, remuxes to a single English audio track, then serves cached MP4 with `Range`.
 
