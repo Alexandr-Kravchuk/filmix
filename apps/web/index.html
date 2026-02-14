@@ -9,8 +9,14 @@
   <body>
     <main class="app">
       <section class="header">
-        <h1 id="show-title">Loading...</h1>
+        <h1 id="show-title">PAW Patrol English Player</h1>
         <p id="status" class="status"></p>
+      </section>
+      <section class="controls">
+        <label class="label" for="source-url">MP4 Source URL</label>
+        <input id="source-url" class="input" type="url" autocomplete="off" />
+        <button id="prepare-btn" class="button" type="button">Prepare English</button>
+        <progress id="progress" class="progress" max="1" value="0"></progress>
       </section>
       <section class="player-wrap">
         <video id="video" controls playsinline preload="metadata"></video>

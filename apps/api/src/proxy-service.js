@@ -25,7 +25,7 @@ export function resolveSourceUrl(rawSource) {
 export async function proxyVideoRequest(req, res, options = {}) {
   const sourceUrl = resolveSourceUrl(req.query.src);
   const headers = {};
-  if (req.headers.range) {
+  if (req.query.norange !== '1' && req.headers.range) {
     headers.Range = req.headers.range;
   }
   if (options.userAgent) {

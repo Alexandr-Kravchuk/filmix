@@ -23,6 +23,12 @@ services:
         sync: false
       - key: FILMIX_PREFERRED_TRANSLATION_PATTERN
         sync: false
+      - key: MEDIA_CACHE_DIR
+        value: /tmp/filmix-cache
+      - key: FFMPEG_BIN
+        value: ffmpeg
+      - key: FFPROBE_BIN
+        value: ffprobe
       - key: SHOW_TITLE
         sync: false
       - key: FIXED_SEASON

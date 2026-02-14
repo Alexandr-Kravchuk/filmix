@@ -226,3 +226,25 @@ test('uses decoded filmix playlist for fixed episode when direct source is not c
     `/proxy/video?src=${encodeURIComponent('https://cdn.example/paw/s05e11_480.mp4')}`
   );
 });
+test('renders watch page for direct source url', async () => {
+  const app = createApp({
+    corsOrigin: 'http://localhost:5173',
+    showTitle: 'PAW Patrol',
+    fixedSeason: 5,
+    fixedEpisode: 11,
+    pageUrl: 'https://filmix.zip/multser/detskij/87660-v-schenyachiy-patrul-chas-2013.html',
+    userAgent: 'TestAgent',
+    version: 'test',
+    filmixClient: {
+      async getPlayerData() {
+        return playerDataFixture;
+      }
+    }
+  });
+  await request(app).get('/watch').expect(400);
+  const src = 'https://cdn.example/video.mp4?user=1093269';
+  const response = await request(app).get('/watch').query({ src }).expect(200);
+  assert.match(response.headers['content-type'], /text\/html/);
+  assert.match(response.text, /<video/);
+  assert.match(response.text, new RegExp(encodeURIComponent(src)));
+});

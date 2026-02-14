@@ -25,14 +25,7 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - name: Build web app
-        env:
-          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
-        run: |
-          if [ -z "$VITE_API_BASE_URL" ]; then
-            echo "Repository variable VITE_API_BASE_URL is required"
-            exit 1
-          fi
-          npm run build:web
+        run: npm run build:web
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

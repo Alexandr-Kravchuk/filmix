@@ -9,6 +9,7 @@ import { getDefaultEnglishMapPath, loadEnglishMap, saveEnglishMap } from './engl
 import { parseHarToEnglishMap } from './har-import-service.js';
 import { resolveEpisodeSourceFromPlayerData } from './playerjs-service.js';
 import { proxyVideoRequest } from './proxy-service.js';
+import { proxyVideoEnglishAudio } from './ffmpeg-service.js';
 
 function loadEnvFiles() {
   dotenv.config({ path: path.resolve(process.cwd(), 'apps/api/.env') });
@@ -47,6 +48,14 @@ function parseBoolean(value, defaultValue) {
     return false;
   }
   return defaultValue;
+}
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
 }
 
 export function createApp(config) {
@@ -264,12 +273,52 @@ export function createApp(config) {
       next(error);
     }
   });
+  app.get('/watch', (req, res) => {
+    const src = String(req.query.src || '');
+    if (!src) {
+      res.status(400).send('Missing src query parameter');
+      return;
+    }
+    const playUrl = `/proxy/video-en?src=${encodeURIComponent(src)}`;
+    const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Video Player</title>
+<style>
+html,body{margin:0;height:100%;background:#0b1220;color:#fff;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{height:100%;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
+video{width:min(100%,1200px);max-height:90vh;background:#000}
+</style>
+</head>
+<body>
+<main>
+<video controls playsinline preload="metadata" src="${escapeHtml(playUrl)}"></video>
+</main>
+</body>
+</html>`;
+    res.status(200).setHeader('Content-Type', 'text/html; charset=utf-8').send(html);
+  });
 
   app.get('/proxy/video', async (req, res, next) => {
     try {
       await proxyVideoRequest(req, res, {
         referer: config.pageUrl,
         userAgent: config.userAgent
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+  app.get('/proxy/video-en', async (req, res, next) => {
+    try {
+      await proxyVideoEnglishAudio(req, res, {
+        referer: config.pageUrl,
+        userAgent: config.userAgent,
+        cacheDir: config.mediaCacheDir,
+        ffmpegBin: config.ffmpegBin,
+        ffprobeBin: config.ffprobeBin
       });
     } catch (error) {
       next(error);
@@ -337,6 +386,9 @@ export function createRuntimeConfig() {
     preferredTranslationPattern: process.env.FILMIX_PREFERRED_TRANSLATION_PATTERN || 'ukr|укра',
     pageUrl,
     userAgent,
+    mediaCacheDir: process.env.MEDIA_CACHE_DIR || '/tmp/filmix-cache',
+    ffmpegBin: process.env.FFMPEG_BIN || 'ffmpeg',
+    ffprobeBin: process.env.FFPROBE_BIN || 'ffprobe',
     filmixClient: new FilmixClient({
       pageUrl,
       login: process.env.FILMIX_LOGIN || '',

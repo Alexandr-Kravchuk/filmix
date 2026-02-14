@@ -39,6 +39,9 @@ Required values:
 - `FIXED_SEASON`
 - `FIXED_EPISODE`
 - `FIXED_QUALITY` (default `480`)
+- `MEDIA_CACHE_DIR` (default `/tmp/filmix-cache`)
+- `FFMPEG_BIN` (default `ffmpeg`)
+- `FFPROBE_BIN` (default `ffprobe`)
 - `FIXED_ENGLISH_SOURCE` (optional direct URL for one-episode mode)
 - `FIXED_LOCAL_FILE_PATH` (optional absolute path to local MP4; highest priority for fixed-episode mode)
 - `FIXED_PUBLIC_MEDIA_URL` (optional public S3/R2 URL for deploy mode)
@@ -67,6 +70,17 @@ Open:
 - Web: `http://localhost:5173`
 - API: `http://localhost:3000`
 
+## Frontend-only mode (macOS Chrome)
+
+You can run web app without API and prepare English track fully in browser via `ffmpeg.wasm`.
+
+```bash
+npm --workspace apps/web run dev
+```
+
+Open Vite URL and click `Prepare English`.
+The app downloads the full source MP4, remuxes it to a single English audio track, and plays resulting `blob:` video.
+
 ## API endpoints
 
 - `GET /api/health`
@@ -76,7 +90,11 @@ Open:
 - `GET /api/play`
 - `GET /api/play?season=1&episode=1&lang=en`
 - `GET /proxy/video?src=<encoded_url>`
+- `GET /proxy/video-en?src=<encoded_url>`
+- `GET /watch?src=<encoded_url>`
 - `POST /api/admin/import-har` with `Authorization: Bearer <ADMIN_TOKEN>`
+
+`/proxy/video-en` downloads source to local cache, remuxes to a single English audio track, then serves cached MP4 with `Range`.
 
 Priority for fixed episode source:
 
@@ -138,8 +156,7 @@ node scripts/smoke-check.mjs \
 ## GitHub Pages deployment
 
 - Workflow file: `.github/workflows/deploy-pages.yml`
-- Frontend build reads `VITE_API_BASE_URL` from repository variable `VITE_API_BASE_URL`.
-- Workflow fails if `VITE_API_BASE_URL` is missing.
+- Frontend builds as standalone static app for frontend-only mode.
 
 The Vite `base` path is auto-set to `/<repo>/` in GitHub Actions.
 
