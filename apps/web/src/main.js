@@ -4,6 +4,8 @@ import { toBlobURL } from '@ffmpeg/util';
 
 const DEFAULT_SOURCE_URL = 'https://nl201.cdnsqu.com/dl/0b339658edb5aabe82533732ae06a196/paw.patrol.2013.dub.ukr/s05e11_480.mp4?user=1093269';
 const CORE_BASE_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm';
+const MAX_SOURCE_BYTES = 300 * 1024 * 1024;
+const OUTPUT_CACHE_NAME = 'filmix-en-track-cache-v1';
 
 const elements = {
   status: document.getElementById('status'),
@@ -13,9 +15,8 @@ const elements = {
   progress: document.getElementById('progress')
 };
 
-const ffmpeg = new FFmpeg();
-let ffmpegLoaded = false;
 let outputBlobUrl = '';
+let coreAssetPromise = null;
 
 function setStatus(message, isError = false) {
   elements.status.textContent = message;
@@ -42,12 +43,57 @@ function concatChunks(chunks, totalLength) {
   return merged;
 }
 
+async function getCoreAssets() {
+  if (!coreAssetPromise) {
+    coreAssetPromise = Promise.all([
+      toBlobURL(`${CORE_BASE_URL}/ffmpeg-core.js`, 'text/javascript'),
+      toBlobURL(`${CORE_BASE_URL}/ffmpeg-core.wasm`, 'application/wasm')
+    ]).then(([coreURL, wasmURL]) => ({ coreURL, wasmURL }));
+  }
+  return coreAssetPromise;
+}
+
+function getCacheKey(sourceUrl) {
+  return `https://filmix-cache.local/en-track/${encodeURIComponent(sourceUrl)}`;
+}
+
+async function loadCachedOutput(sourceUrl) {
+  if (!('caches' in globalThis)) {
+    return null;
+  }
+  const cache = await caches.open(OUTPUT_CACHE_NAME);
+  const response = await cache.match(getCacheKey(sourceUrl));
+  if (!response) {
+    return null;
+  }
+  const bytes = await response.arrayBuffer();
+  return new Uint8Array(bytes);
+}
+
+async function saveCachedOutput(sourceUrl, bytes) {
+  if (!('caches' in globalThis)) {
+    return;
+  }
+  const cache = await caches.open(OUTPUT_CACHE_NAME);
+  await cache.put(
+    getCacheKey(sourceUrl),
+    new Response(new Blob([bytes], { type: 'video/mp4' }), {
+      headers: {
+        'Content-Type': 'video/mp4'
+      }
+    })
+  );
+}
+
 async function downloadSourceFile(url) {
   const response = await fetch(url);
   if (!response.ok || !response.body) {
     throw new Error(`Download failed: HTTP ${response.status}`);
   }
   const total = Number.parseInt(response.headers.get('content-length') || '0', 10);
+  if (Number.isFinite(total) && total > MAX_SOURCE_BYTES) {
+    throw new Error(`Source is too large (${Math.round(total / (1024 * 1024))}MB) for frontend-only processing`);
+  }
   const reader = response.body.getReader();
   const chunks = [];
   let received = 0;
@@ -60,51 +106,137 @@ async function downloadSourceFile(url) {
       chunks.push(value);
       received += value.length;
       if (total > 0) {
-        setProgress((received / total) * 0.4);
+        setProgress((received / total) * 0.35);
+      }
+      if (received > MAX_SOURCE_BYTES) {
+        throw new Error(`Downloaded stream exceeded ${Math.round(MAX_SOURCE_BYTES / (1024 * 1024))}MB limit`);
       }
     }
   }
   return concatChunks(chunks, received);
 }
 
-async function loadFfmpeg() {
-  if (ffmpegLoaded) {
-    return;
-  }
-  setStatus('Loading ffmpeg core...');
-  const coreURL = await toBlobURL(`${CORE_BASE_URL}/ffmpeg-core.js`, 'text/javascript');
-  const wasmURL = await toBlobURL(`${CORE_BASE_URL}/ffmpeg-core.wasm`, 'application/wasm');
-  await ffmpeg.load({ coreURL, wasmURL });
-  ffmpeg.on('progress', ({ progress }) => {
-    setProgress(0.4 + (Number(progress) || 0) * 0.6);
-  });
-  ffmpegLoaded = true;
+function createFfmpegSession() {
+  const ffmpeg = new FFmpeg();
+  let lastError = '';
+  const onLog = ({ type, message }) => {
+    if (type === 'fferr') {
+      lastError = String(message || '').trim();
+    }
+  };
+  const onProgress = ({ progress }) => {
+    setProgress(0.45 + (Number(progress) || 0) * 0.5);
+  };
+  ffmpeg.on('log', onLog);
+  ffmpeg.on('progress', onProgress);
+  return {
+    ffmpeg,
+    getLastError() {
+      return lastError;
+    },
+    dispose() {
+      try {
+        ffmpeg.off('log', onLog);
+        ffmpeg.off('progress', onProgress);
+      } catch {
+      }
+      try {
+        ffmpeg.terminate();
+      } catch {
+      }
+    }
+  };
 }
 
-async function remuxEnglish() {
-  const attempts = [
-    ['-map', '0:v:0', '-map', '0:a:m:language:eng'],
-    ['-map', '0:v:0', '-map', '0:a:1'],
-    ['-map', '0:v:0', '-map', '0:a:0']
-  ];
-  for (const mapping of attempts) {
-    await ffmpeg.exec(['-y', '-i', 'input.mp4', ...mapping, '-c', 'copy', '-movflags', 'faststart', 'output.mp4']).then(
-      () => true,
-      async () => {
-        try {
-          await ffmpeg.deleteFile('output.mp4');
-        } catch {
-        }
-        return false;
-      }
-    );
+async function pickAudioIndex(ffmpeg) {
+  const probeCode = await ffmpeg.ffprobe([
+    '-v',
+    'error',
+    '-show_entries',
+    'stream=index,codec_type:stream_tags=language',
+    '-of',
+    'json',
+    'input.mp4',
+    '-o',
+    'probe.json'
+  ]);
+  if (probeCode !== 0) {
+    throw new Error(`ffprobe failed with code ${probeCode}`);
+  }
+  const probeRaw = await ffmpeg.readFile('probe.json', 'utf8');
+  await ffmpeg.deleteFile('probe.json');
+  const parsed = JSON.parse(String(probeRaw || '{}'));
+  const audioStreams = Array.isArray(parsed.streams)
+    ? parsed.streams.filter((stream) => stream && stream.codec_type === 'audio' && Number.isInteger(stream.index))
+    : [];
+  if (!audioStreams.length) {
+    throw new Error('No audio streams found in source');
+  }
+  const english = audioStreams.find((stream) => {
+    const language = String(stream.tags && stream.tags.language || '').toLowerCase();
+    return language === 'eng' || language === 'en' || language.startsWith('en-');
+  });
+  if (english) {
+    return english.index;
+  }
+  if (audioStreams.length > 1) {
+    return audioStreams[1].index;
+  }
+  return audioStreams[0].index;
+}
+
+async function cleanupSessionFiles(ffmpeg) {
+  const files = ['input.mp4', 'output.mp4', 'probe.json'];
+  for (const fileName of files) {
     try {
-      await ffmpeg.readFile('output.mp4');
-      return;
+      await ffmpeg.deleteFile(fileName);
     } catch {
     }
   }
-  throw new Error('Cannot extract English track from source');
+}
+
+async function buildEnglishTrack(sourceBytes) {
+  const session = createFfmpegSession();
+  try {
+    setStatus('Loading ffmpeg core...');
+    const { coreURL, wasmURL } = await getCoreAssets();
+    await session.ffmpeg.load({ coreURL, wasmURL });
+    setStatus('Analyzing audio tracks...');
+    await session.ffmpeg.writeFile('input.mp4', sourceBytes);
+    const audioIndex = await pickAudioIndex(session.ffmpeg);
+    setStatus('Building English track...');
+    const code = await session.ffmpeg.exec([
+      '-y',
+      '-i',
+      'input.mp4',
+      '-map',
+      '0:v:0',
+      '-map',
+      `0:${audioIndex}`,
+      '-c',
+      'copy',
+      'output.mp4'
+    ]);
+    if (code !== 0) {
+      const details = session.getLastError() || `ffmpeg exit code ${code}`;
+      throw new Error(details);
+    }
+    return await session.ffmpeg.readFile('output.mp4');
+  } finally {
+    await cleanupSessionFiles(session.ffmpeg);
+    session.dispose();
+  }
+}
+
+function applyOutput(outputBytes) {
+  if (outputBlobUrl) {
+    URL.revokeObjectURL(outputBlobUrl);
+  }
+  outputBlobUrl = URL.createObjectURL(new Blob([outputBytes], { type: 'video/mp4' }));
+  elements.video.src = outputBlobUrl;
+  elements.video.load();
+  setProgress(1);
+  setStatus('English track is ready');
 }
 
 async function prepareEnglishTrack() {
@@ -114,35 +246,30 @@ async function prepareEnglishTrack() {
   }
   setBusy(true);
   setProgress(0);
-  await loadFfmpeg();
-  setStatus('Downloading source file...');
-  const sourceBytes = await downloadSourceFile(sourceUrl);
-  setStatus('Building English track...');
-  await ffmpeg.writeFile('input.mp4', sourceBytes);
-  await remuxEnglish();
-  const outputBytes = await ffmpeg.readFile('output.mp4');
   try {
-    await ffmpeg.deleteFile('input.mp4');
-    await ffmpeg.deleteFile('output.mp4');
-  } catch {
+    setStatus('Checking prepared cache...');
+    const cached = await loadCachedOutput(sourceUrl);
+    if (cached) {
+      setProgress(0.95);
+      applyOutput(cached);
+      return;
+    }
+    setStatus('Downloading source file...');
+    const sourceBytes = await downloadSourceFile(sourceUrl);
+    const outputBytes = await buildEnglishTrack(sourceBytes);
+    await saveCachedOutput(sourceUrl, outputBytes);
+    applyOutput(outputBytes);
+  } finally {
+    setBusy(false);
   }
-  if (outputBlobUrl) {
-    URL.revokeObjectURL(outputBlobUrl);
-  }
-  outputBlobUrl = URL.createObjectURL(new Blob([outputBytes], { type: 'video/mp4' }));
-  elements.video.src = outputBlobUrl;
-  elements.video.load();
-  setProgress(1);
-  setStatus('English track is ready');
-  setBusy(false);
 }
 
 async function onPrepareClick() {
   try {
     await prepareEnglishTrack();
   } catch (error) {
-    setStatus(error.message, true);
-    setBusy(false);
+    const message = error && error.message ? error.message : 'Cannot extract English track from source';
+    setStatus(message, true);
     setProgress(0);
   }
 }
