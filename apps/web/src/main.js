@@ -148,41 +148,34 @@ function createFfmpegSession() {
   };
 }
 
-async function pickAudioIndex(ffmpeg) {
-  const probeCode = await ffmpeg.ffprobe([
-    '-v',
-    'error',
-    '-show_entries',
-    'stream=index,codec_type:stream_tags=language',
-    '-of',
-    'json',
-    'input.mp4',
-    '-o',
-    'probe.json'
-  ]);
-  if (probeCode !== 0) {
-    throw new Error(`ffprobe failed with code ${probeCode}`);
+async function remuxWithFallbackMappings(ffmpeg, getLastError) {
+  const mappings = [
+    ['-map', '0:v:0', '-map', '0:a:m:language:eng'],
+    ['-map', '0:v:0', '-map', '0:a:1'],
+    ['-map', '0:v:0', '-map', '0:a:0']
+  ];
+  let lastCode = -1;
+  for (const mapping of mappings) {
+    const code = await ffmpeg.exec([
+      '-y',
+      '-i',
+      'input.mp4',
+      ...mapping,
+      '-c',
+      'copy',
+      'output.mp4'
+    ]);
+    lastCode = code;
+    if (code === 0) {
+      return await ffmpeg.readFile('output.mp4');
+    }
+    try {
+      await ffmpeg.deleteFile('output.mp4');
+    } catch {
+    }
   }
-  const probeRaw = await ffmpeg.readFile('probe.json', 'utf8');
-  await ffmpeg.deleteFile('probe.json');
-  const parsed = JSON.parse(String(probeRaw || '{}'));
-  const audioStreams = Array.isArray(parsed.streams)
-    ? parsed.streams.filter((stream) => stream && stream.codec_type === 'audio' && Number.isInteger(stream.index))
-    : [];
-  if (!audioStreams.length) {
-    throw new Error('No audio streams found in source');
-  }
-  const english = audioStreams.find((stream) => {
-    const language = String(stream.tags && stream.tags.language || '').toLowerCase();
-    return language === 'eng' || language === 'en' || language.startsWith('en-');
-  });
-  if (english) {
-    return english.index;
-  }
-  if (audioStreams.length > 1) {
-    return audioStreams[1].index;
-  }
-  return audioStreams[0].index;
+  const details = getLastError() || `ffmpeg exit code ${lastCode}`;
+  throw new Error(details);
 }
 
 async function cleanupSessionFiles(ffmpeg) {
@@ -201,27 +194,9 @@ async function buildEnglishTrack(sourceBytes) {
     setStatus('Loading ffmpeg core...');
     const { coreURL, wasmURL } = await getCoreAssets();
     await session.ffmpeg.load({ coreURL, wasmURL });
-    setStatus('Analyzing audio tracks...');
-    await session.ffmpeg.writeFile('input.mp4', sourceBytes);
-    const audioIndex = await pickAudioIndex(session.ffmpeg);
     setStatus('Building English track...');
-    const code = await session.ffmpeg.exec([
-      '-y',
-      '-i',
-      'input.mp4',
-      '-map',
-      '0:v:0',
-      '-map',
-      `0:${audioIndex}`,
-      '-c',
-      'copy',
-      'output.mp4'
-    ]);
-    if (code !== 0) {
-      const details = session.getLastError() || `ffmpeg exit code ${code}`;
-      throw new Error(details);
-    }
-    return await session.ffmpeg.readFile('output.mp4');
+    await session.ffmpeg.writeFile('input.mp4', sourceBytes);
+    return await remuxWithFallbackMappings(session.ffmpeg, session.getLastError);
   } finally {
     await cleanupSessionFiles(session.ffmpeg);
     session.dispose();
