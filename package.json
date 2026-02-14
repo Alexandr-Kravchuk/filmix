@@ -1,0 +1,22 @@
+{
+  "name": "filmix-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/web",
+    "apps/api"
+  ],
+  "scripts": {
+    "dev:web": "npm --workspace apps/web run dev",
+    "dev:api": "npm --workspace apps/api run dev",
+    "build:web": "npm --workspace apps/web run build",
+    "build:api": "npm --workspace apps/api run build",
+    "build": "npm run build:web && npm run build:api",
+    "test": "npm --workspace apps/api run test && npm --workspace apps/web run test",
+    "lint": "npm --workspace apps/api run lint && npm --workspace apps/web run lint",
+    "extract:har": "node scripts/extract-english-from-har.mjs",
+    "smoke:local": "node scripts/smoke-check.mjs --api http://localhost:3000 --web http://localhost:5173",
+    "smoke:remote": "node scripts/smoke-check.mjs"
+  }
+}

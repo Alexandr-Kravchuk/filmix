@@ -1,0 +1,47 @@
+services:
+  - type: web
+    name: filmix-api
+    runtime: node
+    rootDir: apps/api
+    buildCommand: npm install
+    startCommand: npm run start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: FILMIX_LOGIN
+        sync: false
+      - key: FILMIX_PASSWORD
+        sync: false
+      - key: FILMIX_PAGE_URL
+        sync: false
+      - key: FILMIX_USER_AGENT
+        sync: false
+      - key: FILMIX_COOKIE
+        sync: false
+      - key: FILMIX_PREFERRED_TRANSLATION_PATTERN
+        sync: false
+      - key: SHOW_TITLE
+        sync: false
+      - key: FIXED_SEASON
+        sync: false
+      - key: FIXED_EPISODE
+        sync: false
+      - key: FIXED_QUALITY
+        sync: false
+      - key: FIXED_ENGLISH_SOURCE
+        value: ""
+      - key: FIXED_LOCAL_FILE_PATH
+        value: ""
+      - key: FIXED_PUBLIC_MEDIA_URL
+        value: ""
+      - key: FIXED_PUBLIC_MEDIA_VIA_PROXY
+        value: "true"
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: CORS_ORIGIN
+        sync: false
+      - key: APP_VERSION
+        sync: false

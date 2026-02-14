@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Redirecting</title>
+  </head>
+  <body>
+    <script>
+      const path = window.location.pathname;
+      const origin = window.location.origin;
+      const parts = path.split('/').filter(Boolean);
+      const repo = parts.length > 0 ? parts[0] : '';
+      const target = repo ? `${origin}/${repo}/` : `${origin}/`;
+      window.location.replace(target);
+    </script>
+  </body>
+</html>
