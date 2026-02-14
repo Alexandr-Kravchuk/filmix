@@ -325,35 +325,25 @@ function createFfmpegSession() {
 }
 
 async function remuxWithFallbackMappings(ffmpeg, getLastError, getDebugLog) {
-  const mappings = [
-    ['-map', '0:v:0', '-map', '0:a:m:language:eng'],
-    ['-map', '0:v:0', '-map', '0:a:1'],
-    ['-map', '0:v:0', '-map', '0:a:0']
-  ];
-  let lastCode = -1;
-  for (const mapping of mappings) {
-    const code = await ffmpeg.exec([
-      '-y',
-      '-i',
-      'input.mp4',
-      ...mapping,
-      '-c',
-      'copy',
-      '-movflags',
-      'faststart',
-      'output.mp4'
-    ]);
-    lastCode = code;
-    if (code === 0) {
-      return await ffmpeg.readFile('output.mp4');
-    }
-    try {
-      await ffmpeg.deleteFile('output.mp4');
-    } catch {
-    }
+  const code = await ffmpeg.exec([
+    '-y',
+    '-i',
+    'input.mp4',
+    '-map',
+    '0:v:0',
+    '-map',
+    '0:a:m:language:eng',
+    '-c',
+    'copy',
+    '-movflags',
+    'faststart',
+    'output.mp4'
+  ]);
+  if (code === 0) {
+    return await ffmpeg.readFile('output.mp4');
   }
-  const details = getLastError() || getDebugLog() || `ffmpeg exit code ${lastCode}`;
-  throw new Error(details);
+  const details = getLastError() || getDebugLog() || `ffmpeg exit code ${code}`;
+  throw new Error(`English track is not available in this source. ${details}`);
 }
 
 async function cleanupSessionFiles(ffmpeg) {
