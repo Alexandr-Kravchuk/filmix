@@ -15,6 +15,9 @@
       <section class="controls">
         <label class="label" for="source-url">MP4 Source URL</label>
         <input id="source-url" class="input" type="url" autocomplete="off" />
+        <label class="label" for="player-data-file">player-data file (optional)</label>
+        <input id="player-data-file" class="input" type="file" accept=".txt,.json,application/json,text/plain" />
+        <button id="extract-btn" class="button secondary" type="button">Extract URL from player-data</button>
         <button id="prepare-btn" class="button" type="button">Prepare English</button>
         <progress id="progress" class="progress" max="1" value="0"></progress>
       </section>

@@ -14,5 +14,8 @@ function resolveBase() {
 }
 
 export default defineConfig({
-  base: resolveBase()
+  base: resolveBase(),
+  optimizeDeps: {
+    exclude: ['@ffmpeg/ffmpeg', '@ffmpeg/util']
+  }
 });

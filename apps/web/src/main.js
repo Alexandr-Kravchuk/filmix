@@ -2,15 +2,29 @@ import './styles.css';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { toBlobURL } from '@ffmpeg/util';
 
-const DEFAULT_SOURCE_URL = 'https://nl201.cdnsqu.com/dl/0b339658edb5aabe82533732ae06a196/paw.patrol.2013.dub.ukr/s05e11_480.mp4?user=1093269';
+const DEFAULT_SOURCE_URL = 'https://nl201.cdnsqu.com/s/FH1wBXsBSNDU06F1B7g3JdU0FBQUFBSld1TUVFUmRCRVZ3NkRWb1pBQg.jYdScSZnAUp3j7hRpWAZpD6vviXfEztbmq8V-Q/Paw-Patrol-2015/s05e11_480.mp4';
 const CORE_BASE_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm';
 const MAX_SOURCE_BYTES = 300 * 1024 * 1024;
 const OUTPUT_CACHE_NAME = 'filmix-en-track-cache-v1';
+const FIXED_SEASON = 5;
+const FIXED_EPISODE = 11;
+const FIXED_QUALITY = 480;
+const TRANSLATION_PATTERN = /ukr|укра/i;
+const DECODE_CONFIG = Object.freeze({
+  file3Separator: ':<:',
+  bk0: '2owKDUoGzsuLNEyhNx',
+  bk1: '19n1iKBr89ubskS5zT',
+  bk2: 'IDaBt08C9Wf7lYr0eH',
+  bk3: 'lNjI9V5U1gMnsxt4Qr',
+  bk4: 'o9wPt0ii42GWeS7L7A'
+});
 
 const elements = {
   status: document.getElementById('status'),
   video: document.getElementById('video'),
   sourceUrl: document.getElementById('source-url'),
+  playerDataFile: document.getElementById('player-data-file'),
+  extractButton: document.getElementById('extract-btn'),
   prepareButton: document.getElementById('prepare-btn'),
   progress: document.getElementById('progress')
 };
@@ -25,6 +39,8 @@ function setStatus(message, isError = false) {
 
 function setBusy(isBusy) {
   elements.prepareButton.disabled = isBusy;
+  elements.extractButton.disabled = isBusy;
+  elements.playerDataFile.disabled = isBusy;
   elements.sourceUrl.disabled = isBusy;
 }
 
@@ -41,6 +57,148 @@ function concatChunks(chunks, totalLength) {
     offset += chunk.length;
   }
   return merged;
+}
+
+function encodeUtf8ToBase64(value) {
+  const normalized = encodeURIComponent(String(value || '')).replace(/%([0-9A-F]{2})/g, (match, code) =>
+    String.fromCharCode(Number.parseInt(code, 16))
+  );
+  return btoa(normalized);
+}
+
+function decodeBase64ToUtf8(value) {
+  const binary = atob(String(value || ''));
+  const percentEncoded = binary
+    .split('')
+    .map((char) => `%${char.charCodeAt(0).toString(16).padStart(2, '0')}`)
+    .join('');
+  return decodeURIComponent(percentEncoded);
+}
+
+function decodePlayerjsValue(encodedValue) {
+  const source = String(encodedValue || '').trim();
+  if (!source.startsWith('#2')) {
+    return source;
+  }
+  let payload = source.slice(2);
+  for (let index = 4; index >= 0; index -= 1) {
+    const key = `bk${index}`;
+    const blockValue = DECODE_CONFIG[key];
+    if (!blockValue) {
+      continue;
+    }
+    const marker = `${DECODE_CONFIG.file3Separator}${encodeUtf8ToBase64(blockValue)}`;
+    payload = payload.split(marker).join('');
+  }
+  return decodeBase64ToUtf8(payload);
+}
+
+function parseEpisodeId(idValue) {
+  const match = String(idValue || '').match(/^s0*(\d+)e0*(\d+)$/i);
+  if (!match) {
+    return null;
+  }
+  const season = Number.parseInt(match[1], 10);
+  const episode = Number.parseInt(match[2], 10);
+  if (!Number.isFinite(season) || !Number.isFinite(episode)) {
+    return null;
+  }
+  return { season, episode };
+}
+
+function parseQualityVariants(fileValue) {
+  return String(fileValue || '')
+    .split(',')
+    .map((chunk) => chunk.trim())
+    .map((chunk) => {
+      const match = chunk.match(/^\[(\d+)p\](https?:.+)$/i);
+      if (!match) {
+        return null;
+      }
+      return {
+        quality: Number.parseInt(match[1], 10),
+        url: match[2]
+      };
+    })
+    .filter(Boolean);
+}
+
+function pickVariant(variants, preferredQuality) {
+  const exact = variants.find((item) => item.quality === preferredQuality);
+  if (exact) {
+    return exact;
+  }
+  return [...variants].sort((a, b) => b.quality - a.quality)[0] || null;
+}
+
+function pickTranslation(videoTranslations) {
+  const entries = Object.entries(videoTranslations || {}).filter((entry) =>
+    typeof entry[1] === 'string' && entry[1].startsWith('#2')
+  );
+  if (!entries.length) {
+    return null;
+  }
+  const preferred = entries.find(([name]) => TRANSLATION_PATTERN.test(name));
+  return preferred || entries[0];
+}
+
+async function resolveSourceFromPlayerDataText(text, onStatusChange) {
+  let parsed;
+  try {
+    parsed = JSON.parse(String(text || '').trim());
+  } catch (error) {
+    throw new Error(`Invalid player-data JSON: ${error.message}`);
+  }
+  const translations = parsed && parsed.message && parsed.message.translations && parsed.message.translations.video;
+  if (!translations || typeof translations !== 'object') {
+    throw new Error('player-data file does not contain message.translations.video');
+  }
+  const translation = pickTranslation(translations);
+  if (!translation) {
+    throw new Error('No decodable translation entry found in player-data');
+  }
+  const playlistUrl = decodePlayerjsValue(translation[1]);
+  if (!playlistUrl.startsWith('http')) {
+    throw new Error('Decoded playlist URL is invalid');
+  }
+  onStatusChange('Downloading playlist...');
+  const playlistResponse = await fetch(playlistUrl, {
+    headers: {
+      Accept: 'text/plain,application/json,*/*'
+    }
+  });
+  if (!playlistResponse.ok) {
+    throw new Error(`Playlist request failed: HTTP ${playlistResponse.status}`);
+  }
+  const playlistBody = await playlistResponse.text();
+  const decodedPlaylist = decodePlayerjsValue(playlistBody);
+  let playlistJson;
+  try {
+    playlistJson = JSON.parse(decodedPlaylist);
+  } catch (error) {
+    throw new Error(`Playlist payload is invalid: ${error.message}`);
+  }
+  if (!Array.isArray(playlistJson)) {
+    throw new Error('Playlist payload has unsupported structure');
+  }
+  for (const seasonEntry of playlistJson) {
+    const folder = Array.isArray(seasonEntry && seasonEntry.folder) ? seasonEntry.folder : [];
+    for (const episodeEntry of folder) {
+      const parsedId = parseEpisodeId(episodeEntry ? episodeEntry.id : '');
+      if (!parsedId) {
+        continue;
+      }
+      if (parsedId.season !== FIXED_SEASON || parsedId.episode !== FIXED_EPISODE) {
+        continue;
+      }
+      const variants = parseQualityVariants(episodeEntry.file);
+      const picked = pickVariant(variants, FIXED_QUALITY);
+      if (picked && picked.url) {
+        return picked.url;
+      }
+    }
+  }
+  throw new Error(`Episode s${String(FIXED_SEASON).padStart(2, '0')}e${String(FIXED_EPISODE).padStart(2, '0')} was not found in playlist`);
 }
 
 async function getCoreAssets() {
@@ -90,6 +248,10 @@ async function downloadSourceFile(url) {
   if (!response.ok || !response.body) {
     throw new Error(`Download failed: HTTP ${response.status}`);
   }
+  const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+  if (contentType && !contentType.includes('video/') && !contentType.includes('application/octet-stream')) {
+    throw new Error(`Source URL is invalid or expired: expected video, got ${contentType}. Refresh URL from player-data file.`);
+  }
   const total = Number.parseInt(response.headers.get('content-length') || '0', 10);
   if (Number.isFinite(total) && total > MAX_SOURCE_BYTES) {
     throw new Error(`Source is too large (${Math.round(total / (1024 * 1024))}MB) for frontend-only processing`);
@@ -112,6 +274,9 @@ async function downloadSourceFile(url) {
         throw new Error(`Downloaded stream exceeded ${Math.round(MAX_SOURCE_BYTES / (1024 * 1024))}MB limit`);
       }
     }
+  }
+  if (received === 0) {
+    throw new Error('Source URL returned empty response body. Refresh URL from player-data file.');
   }
   return concatChunks(chunks, received);
 }
@@ -262,9 +427,33 @@ async function onPrepareClick() {
   }
 }
 
+async function onExtractClick() {
+  const file = elements.playerDataFile.files && elements.playerDataFile.files[0];
+  if (!file) {
+    setStatus('Select player-data text/json file first', true);
+    return;
+  }
+  setBusy(true);
+  setProgress(0);
+  try {
+    setStatus('Reading player-data...');
+    const text = await file.text();
+    const sourceUrl = await resolveSourceFromPlayerDataText(text, (status) => setStatus(status));
+    elements.sourceUrl.value = sourceUrl;
+    setStatus('Source URL refreshed from player-data');
+  } catch (error) {
+    const message = error && error.message ? error.message : 'Cannot extract source from player-data';
+    setStatus(message, true);
+  } finally {
+    setBusy(false);
+    setProgress(0);
+  }
+}
+
 function init() {
   elements.sourceUrl.value = DEFAULT_SOURCE_URL;
   elements.prepareButton.addEventListener('click', onPrepareClick);
+  elements.extractButton.addEventListener('click', onExtractClick);
   setStatus('Click "Prepare English"');
 }
 

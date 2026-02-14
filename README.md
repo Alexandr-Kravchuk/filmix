@@ -81,6 +81,8 @@ npm --workspace apps/web run dev
 Open Vite URL and click `Prepare English`.
 The app downloads the full source MP4, remuxes it to a single English audio track, and plays resulting `blob:` video.
 
+If source URL expires, export fresh `player-data` response (`text-*.txt` from Proxyman), load it with `Extract URL from player-data`, then run `Prepare English` again.
+
 ## API endpoints
 
 - `GET /api/health`
