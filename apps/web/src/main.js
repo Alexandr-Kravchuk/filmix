@@ -119,9 +119,17 @@ async function downloadSourceFile(url) {
 function createFfmpegSession() {
   const ffmpeg = new FFmpeg();
   let lastError = '';
+  const logTail = [];
   const onLog = ({ type, message }) => {
+    const text = String(message || '').trim();
+    if (text) {
+      logTail.push(text);
+      if (logTail.length > 40) {
+        logTail.shift();
+      }
+    }
     if (type === 'fferr') {
-      lastError = String(message || '').trim();
+      lastError = text;
     }
   };
   const onProgress = ({ progress }) => {
@@ -133,6 +141,9 @@ function createFfmpegSession() {
     ffmpeg,
     getLastError() {
       return lastError;
+    },
+    getDebugLog() {
+      return logTail.join(' | ');
     },
     dispose() {
       try {
@@ -148,7 +159,7 @@ function createFfmpegSession() {
   };
 }
 
-async function remuxWithFallbackMappings(ffmpeg, getLastError) {
+async function remuxWithFallbackMappings(ffmpeg, getLastError, getDebugLog) {
   const mappings = [
     ['-map', '0:v:0', '-map', '0:a:m:language:eng'],
     ['-map', '0:v:0', '-map', '0:a:1'],
@@ -163,6 +174,8 @@ async function remuxWithFallbackMappings(ffmpeg, getLastError) {
       ...mapping,
       '-c',
       'copy',
+      '-movflags',
+      'faststart',
       'output.mp4'
     ]);
     lastCode = code;
@@ -174,7 +187,7 @@ async function remuxWithFallbackMappings(ffmpeg, getLastError) {
     } catch {
     }
   }
-  const details = getLastError() || `ffmpeg exit code ${lastCode}`;
+  const details = getLastError() || getDebugLog() || `ffmpeg exit code ${lastCode}`;
   throw new Error(details);
 }
 
@@ -196,7 +209,7 @@ async function buildEnglishTrack(sourceBytes) {
     await session.ffmpeg.load({ coreURL, wasmURL });
     setStatus('Building English track...');
     await session.ffmpeg.writeFile('input.mp4', sourceBytes);
-    return await remuxWithFallbackMappings(session.ffmpeg, session.getLastError);
+    return await remuxWithFallbackMappings(session.ffmpeg, session.getLastError, session.getDebugLog);
   } finally {
     await cleanupSessionFiles(session.ffmpeg);
     session.dispose();
