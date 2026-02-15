@@ -41,6 +41,15 @@ export async function fetchShow(options = {}) {
 export async function fetchSourceByEpisode(season, episode) {
   return fetchJson('/api/source', { season, episode });
 }
+export async function fetchSourceBatch(season, episodes) {
+  const normalized = Array.from(new Set((Array.isArray(episodes) ? episodes : [])
+    .map((value) => Number.parseInt(String(value), 10))
+    .filter((value) => Number.isFinite(value) && value > 0)));
+  return fetchJson('/api/source-batch', {
+    season,
+    episodes: normalized.join(',')
+  });
+}
 export async function fetchPlaybackProgress() {
   return fetchJson('/api/progress');
 }
@@ -60,5 +69,5 @@ export function sendPlaybackProgressBeacon(payload) {
   }
   const url = makeApiUrl('/api/progress');
   const body = JSON.stringify(payload || {});
-  return navigator.sendBeacon(url.toString(), new Blob([body], { type: 'application/json' }));
+  return navigator.sendBeacon(url.toString(), body);
 }

@@ -45,6 +45,14 @@ services:
         value: ""
       - key: FIXED_PUBLIC_MEDIA_VIA_PROXY
         value: "true"
+      - key: PLAYBACK_PROGRESS_PATH
+        value: /tmp/filmix-playback-progress.json
+      - key: SOURCE_CACHE_TTL_MS
+        value: "1800000"
+      - key: PLAYLIST_CACHE_TTL_MS
+        value: "600000"
+      - key: PLAYER_DATA_CACHE_TTL_MS
+        value: "60000"
       - key: ADMIN_TOKEN
         sync: false
       - key: CORS_ORIGIN

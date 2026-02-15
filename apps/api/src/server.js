@@ -10,6 +10,7 @@ import { parseHarToEnglishMap } from './har-import-service.js';
 import { resolveEpisodeSourceFromPlayerData } from './playerjs-service.js';
 import { proxyVideoRequest } from './proxy-service.js';
 import { proxyVideoEnglishAudio } from './ffmpeg-service.js';
+import { createSourceCacheService } from './source-cache-service.js';
 
 function loadEnvFiles() {
   dotenv.config({ path: path.resolve(process.cwd(), 'apps/api/.env') });
@@ -103,6 +104,25 @@ function getEmptyPlaybackProgress() {
     updatedAt: 0
   };
 }
+function parseProgressBody(value) {
+  if (typeof value === 'string') {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  if (value && typeof value === 'object') {
+    return value;
+  }
+  return null;
+}
+function parseEpisodesCsv(value) {
+  return Array.from(new Set(String(value || '')
+    .split(',')
+    .map((part) => Number.parseInt(part.trim(), 10))
+    .filter((part) => Number.isFinite(part) && part > 0))).sort((a, b) => a - b);
+}
 
 export function createApp(config) {
   const app = express();
@@ -118,6 +138,9 @@ export function createApp(config) {
   const fixedQuality = Number.parseInt(String(config.fixedQuality || '480'), 10);
   const preferredTranslationPattern = config.preferredTranslationPattern || 'ukr|укра';
   const playbackProgressPath = config.playbackProgressPath || '/tmp/filmix-playback-progress.json';
+  const sourceCacheTtlMs = Number.parseInt(String(config.sourceCacheTtlMs || '1800000'), 10);
+  const playlistCacheTtlMs = Number.parseInt(String(config.playlistCacheTtlMs || '600000'), 10);
+  const playerDataCacheTtlMs = Number.parseInt(String(config.playerDataCacheTtlMs || '60000'), 10);
   const playlistFetch = config.playlistFetch || fetch;
   let cache = null;
   let playbackProgress = null;
@@ -196,27 +219,17 @@ export function createApp(config) {
     }
     return null;
   }
-  async function resolveSourceDataForEpisode(season, episode) {
-    if (season === fixedSeason && episode === fixedEpisode) {
-      return resolveFixedSourceData();
-    }
-    const playerData = await config.filmixClient.getPlayerData();
-    try {
-      const resolved = await resolveEpisodeSourceFromPlayerData(playerData, {
-        season,
-        episode,
-        preferredQuality: fixedQuality,
-        preferredTranslationPattern,
-        userAgent: config.userAgent,
-        fetchImpl: playlistFetch
+  async function resolveCatalogSourceData(season, episode, context = {}) {
+    let catalog = null;
+    if (context && context.playerData) {
+      const englishMap = await loadEnglishMap(mapPath);
+      catalog = createCatalog(context.playerData, {
+        showTitle: config.showTitle,
+        englishMap
       });
-      return {
-        sourceUrl: resolved.sourceUrl,
-        origin: 'player-data'
-      };
-    } catch {
+    } else {
+      catalog = await buildCatalogSnapshot();
     }
-    const catalog = await buildCatalogSnapshot();
     const data = getEpisodeData(catalog, season, episode);
     const source = pickCatalogSource(data);
     if (!source) {
@@ -228,6 +241,23 @@ export function createApp(config) {
       sourceUrl: source.sourceUrl,
       origin: 'catalog'
     };
+  }
+  const sourceCacheService = createSourceCacheService({
+    fetchPlayerData: async () => config.filmixClient.getPlayerData(),
+    fetchImpl: playlistFetch,
+    preferredQuality: fixedQuality,
+    preferredTranslationPattern,
+    userAgent: config.userAgent,
+    sourceCacheTtlMs,
+    playlistCacheTtlMs,
+    playerDataCacheTtlMs,
+    resolveCatalogSource: resolveCatalogSourceData
+  });
+  async function resolveSourceDataForEpisode(season, episode) {
+    if (season === fixedSeason && episode === fixedEpisode && (fixedLocalFilePath || fixedPublicMediaUrl || fixedEnglishSource)) {
+      return resolveFixedSourceData();
+    }
+    return sourceCacheService.resolveEpisodeSource(season, episode);
   }
 
   async function sendLocalVideo(filePath, req, res) {
@@ -281,6 +311,7 @@ export function createApp(config) {
 
   function resetCache() {
     cache = null;
+    sourceCacheService.clear();
   }
   async function loadPlaybackProgressFromDisk() {
     try {
@@ -318,8 +349,12 @@ export function createApp(config) {
     await mkdir(dir, { recursive: true });
     await writeFile(playbackProgressPath, `${JSON.stringify(progress)}\n`, 'utf8');
   }
+  function setMetadataCacheHeader(res) {
+    res.setHeader('Cache-Control', 'public, max-age=30');
+  }
 
   app.use(express.json({ limit: '30mb' }));
+  app.use('/api/progress', express.text({ type: 'text/plain', limit: '20kb' }));
 
   app.use((req, res, next) => {
     const origin = req.headers.origin;
@@ -356,7 +391,8 @@ export function createApp(config) {
   });
   app.post('/api/progress', async (req, res, next) => {
     try {
-      const nextProgress = normalizePlaybackProgress(req.body);
+      const progressBody = parseProgressBody(req.body);
+      const nextProgress = normalizePlaybackProgress(progressBody);
       if (!nextProgress) {
         res.status(400).json({ error: 'Invalid progress payload' });
         return;
@@ -377,6 +413,7 @@ export function createApp(config) {
     try {
       const force = parseBoolean(req.query.force, false);
       const catalog = await buildCatalogSnapshot(force);
+      setMetadataCacheHeader(res);
       res.json({
         title: catalog.title,
         seasons: catalog.seasons,
@@ -423,6 +460,7 @@ export function createApp(config) {
       const hasEpisode = Object.hasOwn(req.query, 'episode');
       if (!hasSeason && !hasEpisode) {
         const sourceData = await resolveFixedSourceData();
+        setMetadataCacheHeader(res);
         res.json({
           season: fixedSeason,
           episode: fixedEpisode,
@@ -438,11 +476,35 @@ export function createApp(config) {
         return;
       }
       const sourceData = await resolveSourceDataForEpisode(season, episode);
+      setMetadataCacheHeader(res);
       res.json({
         season,
         episode,
         sourceUrl: sourceData.sourceUrl,
         origin: sourceData.origin
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+  app.get('/api/source-batch', async (req, res, next) => {
+    try {
+      const season = Number.parseInt(String(req.query.season || ''), 10);
+      const episodes = parseEpisodesCsv(req.query.episodes);
+      if (!Number.isFinite(season) || season <= 0) {
+        res.status(400).json({ error: 'season is required integer' });
+        return;
+      }
+      if (!episodes.length) {
+        res.status(400).json({ error: 'episodes must be a comma-separated integer list' });
+        return;
+      }
+      const items = await sourceCacheService.resolveEpisodeSourcesBatch(season, episodes);
+      setMetadataCacheHeader(res);
+      res.json({
+        season,
+        items,
+        generatedAt: Date.now()
       });
     } catch (error) {
       next(error);
@@ -607,6 +669,9 @@ export function createRuntimeConfig() {
     fixedQuality: parsePreferredQuality(process.env.FIXED_QUALITY || 'max'),
     preferredTranslationPattern: process.env.FILMIX_PREFERRED_TRANSLATION_PATTERN || 'ukr|укра',
     playbackProgressPath: process.env.PLAYBACK_PROGRESS_PATH || '/tmp/filmix-playback-progress.json',
+    sourceCacheTtlMs: Number.parseInt(process.env.SOURCE_CACHE_TTL_MS || '1800000', 10),
+    playlistCacheTtlMs: Number.parseInt(process.env.PLAYLIST_CACHE_TTL_MS || '600000', 10),
+    playerDataCacheTtlMs: Number.parseInt(process.env.PLAYER_DATA_CACHE_TTL_MS || '60000', 10),
     pageUrl,
     userAgent,
     mediaCacheDir: process.env.MEDIA_CACHE_DIR || '/tmp/filmix-cache',

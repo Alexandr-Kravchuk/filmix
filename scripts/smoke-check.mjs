@@ -54,7 +54,11 @@ async function run() {
   const webUrl = args.web || args.webUrl || args.web_url || '';
   const season = asInteger(args.season, 5);
   const episode = asInteger(args.episode, 11);
-  const quality = asInteger(args.quality, 480);
+  const qualityRaw = String(args.quality || 'max').trim().toLowerCase();
+  const quality = asInteger(args.quality, Number.NaN);
+  const expectedPrefix = `s${String(season).padStart(2, '0')}e${String(episode).padStart(2, '0')}_`;
+  const expectedExactToken = Number.isFinite(quality) && quality > 0 ? `${expectedPrefix}${quality}.mp4` : '';
+  const expectedPattern = new RegExp(`${expectedPrefix}\\d+\\.mp4`);
   process.stdout.write(`Smoke API base: ${apiBase}\n`);
   const health = await requestJson(`${apiBase}/api/health`, {
     headers: {
@@ -80,11 +84,32 @@ async function run() {
   const resolvedUrl = new URL(playUrl, `${apiBase}/`);
   const encodedSrc = resolvedUrl.searchParams.get('src') || '';
   const sourceUrl = decodeURIComponent(encodedSrc);
-  const expectedToken = `s${String(season).padStart(2, '0')}e${String(episode).padStart(2, '0')}_${quality}.mp4`;
-  if (!sourceUrl.includes(expectedToken)) {
-    fail(`Source URL does not include expected episode token ${expectedToken}: ${sourceUrl}`);
+  const sourceMatches = expectedExactToken ? sourceUrl.includes(expectedExactToken) : expectedPattern.test(sourceUrl);
+  if (!sourceMatches) {
+    if (expectedExactToken) {
+      fail(`Source URL does not include expected episode token ${expectedExactToken}: ${sourceUrl}`);
+    }
+    fail(`Source URL does not match expected token pattern ${expectedPattern}: ${sourceUrl}`);
   }
-  process.stdout.write(`Fixed episode source token check passed: ${expectedToken}\n`);
+  process.stdout.write(`Fixed episode source token check passed: ${qualityRaw}\n`);
+  const sourceBatch = await requestJson(`${apiBase}/api/source-batch?season=${season}&episodes=${episode}`, {
+    headers: {
+      Accept: 'application/json'
+    }
+  });
+  if (!sourceBatch.response.ok || !sourceBatch.data || !Array.isArray(sourceBatch.data.items)) {
+    fail(`Source batch check failed: HTTP ${sourceBatch.response.status} ${sourceBatch.text}`);
+  }
+  const batchItem = sourceBatch.data.items.find((item) => Number.parseInt(String(item.episode || ''), 10) === episode);
+  const batchSourceUrl = batchItem && typeof batchItem.sourceUrl === 'string' ? batchItem.sourceUrl : '';
+  const batchMatches = expectedExactToken ? batchSourceUrl.includes(expectedExactToken) : expectedPattern.test(batchSourceUrl);
+  if (!batchItem || !batchMatches) {
+    if (expectedExactToken) {
+      fail(`Source batch does not include expected episode token ${expectedExactToken}`);
+    }
+    fail(`Source batch does not match expected token pattern ${expectedPattern}`);
+  }
+  process.stdout.write(`Source batch check passed: ${qualityRaw}\n`);
   const proxyResponse = await fetch(resolvedUrl, {
     headers: {
       Range: 'bytes=0-1'

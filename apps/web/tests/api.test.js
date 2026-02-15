@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fetchShow, fetchSourceByEpisode, fetchPlaybackProgress, savePlaybackProgress, sendPlaybackProgressBeacon, getApiBaseUrl } from '../src/api.js';
+import { fetchShow, fetchSourceByEpisode, fetchSourceBatch, fetchPlaybackProgress, savePlaybackProgress, sendPlaybackProgressBeacon, getApiBaseUrl } from '../src/api.js';
 
 test('uses localhost api base by default', () => {
   assert.equal(getApiBaseUrl(), 'http://localhost:3000');
@@ -11,6 +11,9 @@ test('exports show loader', () => {
 });
 test('exports episode source loader', () => {
   assert.equal(typeof fetchSourceByEpisode, 'function');
+});
+test('exports source batch loader', () => {
+  assert.equal(typeof fetchSourceBatch, 'function');
 });
 
 test('sends force query when loading show with force option', async () => {
@@ -54,6 +57,26 @@ test('loads playback progress from api endpoint', async () => {
     globalThis.fetch = originalFetch;
   }
   assert.match(calledUrl, /\/api\/progress$/);
+});
+
+test('loads source batch with season and episodes csv', async () => {
+  const originalFetch = globalThis.fetch;
+  let calledUrl = '';
+  globalThis.fetch = async (url) => {
+    calledUrl = String(url);
+    return {
+      ok: true,
+      async json() {
+        return {};
+      }
+    };
+  };
+  try {
+    await fetchSourceBatch(5, [11, 12, 12, '13']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.match(calledUrl, /\/api\/source-batch\?season=5&episodes=11%2C12%2C13$/);
 });
 
 test('saves playback progress with json payload', async () => {
@@ -100,4 +123,34 @@ test('returns false when beacon api is unavailable', () => {
       delete globalThis.navigator;
     }
   }
+});
+
+test('sends progress beacon as plain text json string', () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  let urlValue = '';
+  let dataValue = '';
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: {
+      sendBeacon(url, data) {
+        urlValue = String(url);
+        dataValue = String(data);
+        return true;
+      }
+    }
+  });
+  try {
+    const result = sendPlaybackProgressBeacon({ season: 5, episode: 11, currentTime: 5 });
+    assert.equal(result, true);
+  } finally {
+    if (descriptor) {
+      Object.defineProperty(globalThis, 'navigator', descriptor);
+    } else {
+      delete globalThis.navigator;
+    }
+  }
+  assert.match(urlValue, /\/api\/progress$/);
+  assert.equal(dataValue, '{"season":5,"episode":11,"currentTime":5}');
 });

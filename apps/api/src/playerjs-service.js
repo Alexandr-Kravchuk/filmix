@@ -6,6 +6,9 @@ const defaultDecodeConfig = Object.freeze({
   bk3: 'lNjI9V5U1gMnsxt4Qr',
   bk4: 'o9wPt0ii42GWeS7L7A'
 });
+export function getDefaultDecodeConfig() {
+  return defaultDecodeConfig;
+}
 
 function encodeUtf8ToBase64(value) {
   const normalized = encodeURIComponent(String(value || '')).replace(/%([0-9A-F]{2})/g, (match, code) =>
@@ -70,7 +73,7 @@ function parseEpisodeId(idValue) {
   return { season, episode };
 }
 
-function pickTranslation(videoTranslations, preferredTranslationPattern) {
+export function pickTranslation(videoTranslations, preferredTranslationPattern) {
   const entries = Object.entries(videoTranslations || {}).filter((entry) => typeof entry[1] === 'string' && entry[1].startsWith('#2'));
   if (!entries.length) {
     return null;
@@ -89,7 +92,7 @@ function pickTranslation(videoTranslations, preferredTranslationPattern) {
   return entries[0];
 }
 
-function findEpisodeSourceUrl(playlistJson, season, episode, preferredQuality) {
+export function findEpisodeSourceUrl(playlistJson, season, episode, preferredQuality) {
   if (!Array.isArray(playlistJson)) {
     return null;
   }
@@ -110,6 +113,15 @@ function findEpisodeSourceUrl(playlistJson, season, episode, preferredQuality) {
   }
   return null;
 }
+export function getVideoTranslations(playerData) {
+  const translations = playerData && playerData.message && playerData.message.translations && playerData.message.translations.video
+    ? playerData.message.translations.video
+    : null;
+  if (!translations || typeof translations !== 'object') {
+    return null;
+  }
+  return translations;
+}
 
 export function decodePlayerjsValue(encodedValue, decodeConfig = defaultDecodeConfig) {
   const source = String(encodedValue || '');
@@ -128,17 +140,17 @@ export function decodePlayerjsValue(encodedValue, decodeConfig = defaultDecodeCo
   }
   return decodeBase64ToUtf8(payload);
 }
-
-export async function resolveEpisodeSourceFromPlayerData(playerData, options = {}) {
-  const season = Number.parseInt(String(options.season || ''), 10);
-  const episode = Number.parseInt(String(options.episode || ''), 10);
-  if (!Number.isFinite(season) || !Number.isFinite(episode)) {
-    throw new Error('season and episode are required integers');
+export function decodePlaylistJson(playlistText, decodeConfig = defaultDecodeConfig) {
+  const decodedPlaylistText = decodePlayerjsValue(playlistText, decodeConfig);
+  try {
+    return JSON.parse(decodedPlaylistText);
+  } catch (error) {
+    throw new Error(`playlist payload is not JSON: ${error.message}`);
   }
-  const translations = playerData && playerData.message && playerData.message.translations && playerData.message.translations.video
-    ? playerData.message.translations.video
-    : null;
-  if (!translations || typeof translations !== 'object') {
+}
+export function resolvePlaylistUrlFromPlayerData(playerData, options = {}) {
+  const translations = getVideoTranslations(playerData);
+  if (!translations) {
     throw new Error('player-data does not contain translations.video');
   }
   const translation = pickTranslation(translations, options.preferredTranslationPattern);
@@ -150,6 +162,12 @@ export async function resolveEpisodeSourceFromPlayerData(playerData, options = {
   if (!playlistUrl.startsWith('http')) {
     throw new Error('decoded playlist url is invalid');
   }
+  return {
+    translationName,
+    playlistUrl
+  };
+}
+export async function fetchDecodedPlaylistJson(playlistUrl, options = {}) {
   const fetchImpl = options.fetchImpl || fetch;
   const response = await fetchImpl(playlistUrl, {
     headers: {
@@ -161,13 +179,17 @@ export async function resolveEpisodeSourceFromPlayerData(playerData, options = {
     throw new Error(`playlist request failed: HTTP ${response.status}`);
   }
   const playlistText = await response.text();
-  const decodedPlaylistText = decodePlayerjsValue(playlistText, options.decodeConfig || defaultDecodeConfig);
-  let playlistJson;
-  try {
-    playlistJson = JSON.parse(decodedPlaylistText);
-  } catch (error) {
-    throw new Error(`playlist payload is not JSON: ${error.message}`);
+  return decodePlaylistJson(playlistText, options.decodeConfig || defaultDecodeConfig);
+}
+
+export async function resolveEpisodeSourceFromPlayerData(playerData, options = {}) {
+  const season = Number.parseInt(String(options.season || ''), 10);
+  const episode = Number.parseInt(String(options.episode || ''), 10);
+  if (!Number.isFinite(season) || !Number.isFinite(episode)) {
+    throw new Error('season and episode are required integers');
   }
+  const { translationName, playlistUrl } = resolvePlaylistUrlFromPlayerData(playerData, options);
+  const playlistJson = await fetchDecodedPlaylistJson(playlistUrl, options);
   const sourceUrl = findEpisodeSourceUrl(playlistJson, season, episode, options.preferredQuality || 480);
   if (!sourceUrl) {
     throw new Error('episode source was not found in decoded playlist');
@@ -178,4 +200,3 @@ export async function resolveEpisodeSourceFromPlayerData(playerData, options = {
     translationName
   };
 }
-

@@ -47,6 +47,9 @@ Required values:
 - `FIXED_PUBLIC_MEDIA_URL` (optional public S3/R2 URL for deploy mode)
 - `FIXED_PUBLIC_MEDIA_VIA_PROXY` (`true` or `false`, default `true`)
 - `PLAYBACK_PROGRESS_PATH` (default `/tmp/filmix-playback-progress.json`)
+- `SOURCE_CACHE_TTL_MS` (default `1800000`)
+- `PLAYLIST_CACHE_TTL_MS` (default `600000`)
+- `PLAYER_DATA_CACHE_TTL_MS` (default `60000`)
 
 Frontend build uses:
 
@@ -92,6 +95,7 @@ If source URL expires, export fresh `player-data` response (`text-*.txt` from Pr
 - `GET /api/fixed-episode`
 - `GET /api/source`
 - `GET /api/source?season=5&episode=11`
+- `GET /api/source-batch?season=5&episodes=11,12,13`
 - `POST /api/progress`
 - `GET /api/episode?season=1&episode=1`
 - `GET /api/play`
@@ -106,9 +110,14 @@ If source URL expires, export fresh `player-data` response (`text-*.txt` from Pr
 - without query params returns fixed episode source
 - with `season` and `episode` returns source for selected episode
 
+`/api/source-batch` returns source URLs for multiple episodes of one season:
+
+- request: `season` + `episodes` CSV
+- response: `{ season, items: [{ episode, sourceUrl, origin }], generatedAt }`
+
 `/proxy/video-en` downloads source to local cache, remuxes to a single English audio track, then serves cached MP4 with `Range`.
 
-`/api/progress` stores shared resume position (`season`, `episode`, `currentTime`, `duration`, `updatedAt`) so playback can continue from another device.
+`/api/progress` stores shared resume position (`season`, `episode`, `currentTime`, `duration`, `updatedAt`) so playback can continue from another device. The endpoint accepts both `application/json` and `text/plain` JSON body.
 
 Priority for fixed episode source:
 
