@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { decodePlayerjsValue, resolveEpisodeSourceFromPlayerData } from '../src/playerjs-service.js';
+import { decodePlayerjsValue, findEpisodeVariants, pickVariant, resolveEpisodeSourceFromPlayerData } from '../src/playerjs-service.js';
 
 const decodeConfig = Object.freeze({
   file3Separator: ':<:',
@@ -82,7 +82,7 @@ test('resolves episode source from translations video and playlist', async () =>
   assert.equal(response.translationName, 'Дубляж [Ukr, MEGOGO Voice]');
 });
 
-test('falls back to max quality when preferred quality is missing', async () => {
+test('falls back to nearest lower or minimum quality when preferred quality is missing', async () => {
   const playlistUrl = 'https://filmix.zip/pl/paw.txt';
   const playlist = [
     {
@@ -116,7 +116,38 @@ test('falls back to max quality when preferred quality is missing', async () => 
       }
     })
   });
-  assert.equal(response.sourceUrl, 'https://cdn.example/paw/s05e11_1080.mp4');
+  assert.equal(response.sourceUrl, 'https://cdn.example/paw/s05e11_720.mp4');
+  assert.equal(response.quality, 720);
+});
+
+test('extracts and sorts episode variants', () => {
+  const variants = findEpisodeVariants(
+    [{
+      title: 'Сезон 5',
+      folder: [{
+        id: 's5e11',
+        file: '[1080p]https://cdn.example/paw/s05e11_1080.mp4,[480p]https://cdn.example/paw/s05e11_480.mp4,[720p]https://cdn.example/paw/s05e11_720.mp4'
+      }]
+    }],
+    5,
+    11
+  );
+  assert.deepEqual(
+    variants.map((item) => item.quality),
+    [480, 720, 1080]
+  );
+});
+
+test('picks exact, then lower, then minimum quality', () => {
+  const variants = [
+    { quality: 480, url: 'v480' },
+    { quality: 720, url: 'v720' },
+    { quality: 1080, url: 'v1080' }
+  ];
+  assert.equal(pickVariant(variants, 720).url, 'v720');
+  assert.equal(pickVariant(variants, 900).url, 'v720');
+  assert.equal(pickVariant(variants, 360).url, 'v480');
+  assert.equal(pickVariant(variants, 'max').url, 'v1080');
 });
 
 test('throws when episode is missing in decoded playlist', async () => {

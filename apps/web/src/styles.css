@@ -89,6 +89,11 @@ body {
   margin: 8px 0 0;
   color: var(--muted);
 }
+.status.secondary {
+  margin-top: 4px;
+  font-size: 0.86rem;
+  opacity: 0.95;
+}
 .status.error {
   color: var(--warn);
 }

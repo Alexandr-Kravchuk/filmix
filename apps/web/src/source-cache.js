@@ -1,6 +1,23 @@
 const SOURCE_CACHE_KEY = 'filmix-source-cache-v1';
 const SOURCE_CACHE_VERSION = 1;
 const SOURCE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+function normalizeQualityKey(quality) {
+  if (quality === undefined || quality === null || String(quality).trim() === '') {
+    return 'max';
+  }
+  const normalized = String(quality).trim().toLowerCase();
+  if (normalized === 'max' || normalized === 'highest' || normalized === 'best') {
+    return 'max';
+  }
+  const parsed = Number.parseInt(normalized, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 'max';
+  }
+  return String(parsed);
+}
+export function buildSourceCacheKey(season, episode, quality = 'max') {
+  return `${season}:${episode}:${normalizeQualityKey(quality)}`;
+}
 
 function getStorage() {
   try {

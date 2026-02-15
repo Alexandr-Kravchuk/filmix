@@ -110,6 +110,28 @@ async function run() {
     fail(`Source batch does not match expected token pattern ${expectedPattern}`);
   }
   process.stdout.write(`Source batch check passed: ${qualityRaw}\n`);
+  const sourceLadder = await requestJson(`${apiBase}/api/source-ladder?season=${season}&episode=${episode}`, {
+    headers: {
+      Accept: 'application/json'
+    }
+  });
+  if (!sourceLadder.response.ok || !sourceLadder.data || !Array.isArray(sourceLadder.data.sources)) {
+    fail(`Source ladder check failed: HTTP ${sourceLadder.response.status} ${sourceLadder.text}`);
+  }
+  const ladderMatch = sourceLadder.data.sources.some((item) => {
+    const source = String(item && item.sourceUrl ? item.sourceUrl : '');
+    if (expectedExactToken) {
+      return source.includes(expectedExactToken);
+    }
+    return expectedPattern.test(source);
+  });
+  if (!ladderMatch) {
+    if (expectedExactToken) {
+      fail(`Source ladder does not include expected episode token ${expectedExactToken}`);
+    }
+    fail(`Source ladder does not match expected token pattern ${expectedPattern}`);
+  }
+  process.stdout.write(`Source ladder check passed: ${qualityRaw}\n`);
   const proxyResponse = await fetch(resolvedUrl, {
     headers: {
       Range: 'bytes=0-1'

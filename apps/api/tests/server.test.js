@@ -104,8 +104,22 @@ test('serves show, episode, play and har import', async () => {
   assert.equal(sourceByEpisodeResponse.body.episode, 2);
   assert.equal(sourceByEpisodeResponse.body.sourceUrl, 'https://cdn.example/ru/s01e02_720.mp4');
   assert.equal(sourceByEpisodeResponse.body.origin, 'catalog');
+  assert.equal(sourceByEpisodeResponse.body.quality, 720);
   assert.match(String(sourceByEpisodeResponse.headers['cache-control'] || ''), /max-age=30/);
+  const sourceByQualityResponse = await request(app).get('/api/source').query({ season: 1, episode: 2, quality: 360 }).expect(200);
+  assert.equal(sourceByQualityResponse.body.sourceUrl, 'https://cdn.example/ru/s01e02_720.mp4');
+  assert.equal(sourceByQualityResponse.body.quality, 720);
+  const sourceLadderResponse = await request(app).get('/api/source-ladder').query({ season: 1, episode: 2 }).expect(200);
+  assert.equal(sourceLadderResponse.body.season, 1);
+  assert.equal(sourceLadderResponse.body.episode, 2);
+  assert.equal(sourceLadderResponse.body.bootstrapQuality, 480);
+  assert.equal(sourceLadderResponse.body.maxQuality, 720);
+  assert.deepEqual(
+    sourceLadderResponse.body.sources.map((item) => item.quality),
+    [720]
+  );
   await request(app).get('/api/source').query({ season: 1, episode: 'x' }).expect(400);
+  await request(app).get('/api/source').query({ season: 1, episode: 2, quality: 'bad' }).expect(400);
   await request(app).get('/api/source').query({ season: 1, episode: 9 }).expect(404);
   const fixedPlayResponse = await request(app).get('/api/play').expect(302);
   assert.match(fixedPlayResponse.headers.location, /^\/proxy\/video\?src=/);
@@ -440,9 +454,22 @@ test('serves source batch and reuses source cache for repeated source lookups', 
     const response = await request(app).get('/api/source').query({ season: 5, episode: 11 }).expect(200);
     assert.equal(response.body.sourceUrl, 'https://cdn.example/paw/s05e11_1080.mp4');
     assert.equal(response.body.origin, 'player-data');
+    assert.equal(response.body.quality, 1080);
   }
   assert.ok(playerDataCalls <= 2);
   assert.ok(playlistCalls <= 2);
+  const source480 = await request(app).get('/api/source').query({ season: 5, episode: 11, quality: 480 }).expect(200);
+  assert.equal(source480.body.sourceUrl, 'https://cdn.example/paw/s05e11_480.mp4');
+  assert.equal(source480.body.quality, 480);
+  const source900 = await request(app).get('/api/source').query({ season: 5, episode: 11, quality: 900 }).expect(200);
+  assert.equal(source900.body.sourceUrl, 'https://cdn.example/paw/s05e11_480.mp4');
+  assert.equal(source900.body.quality, 480);
+  const ladder = await request(app).get('/api/source-ladder').query({ season: 5, episode: 11 }).expect(200);
+  assert.equal(ladder.body.maxQuality, 1080);
+  assert.deepEqual(
+    ladder.body.sources.map((item) => item.quality),
+    [480, 1080]
+  );
   const batch = await request(app).get('/api/source-batch').query({ season: 5, episodes: '11,12,99' }).expect(200);
   assert.equal(batch.body.season, 5);
   assert.ok(Number.isFinite(Number(batch.body.generatedAt)));
@@ -455,9 +482,19 @@ test('serves source batch and reuses source cache for repeated source lookups', 
     ['https://cdn.example/paw/s05e11_1080.mp4', 'https://cdn.example/paw/s05e12_1080.mp4']
   );
   assert.match(String(batch.headers['cache-control'] || ''), /max-age=30/);
+  const batch480 = await request(app).get('/api/source-batch').query({ season: 5, episodes: '11,12', quality: 480 }).expect(200);
+  assert.deepEqual(
+    batch480.body.items.map((item) => item.sourceUrl),
+    ['https://cdn.example/paw/s05e11_480.mp4', 'https://cdn.example/paw/s05e12_480.mp4']
+  );
+  assert.deepEqual(
+    batch480.body.items.map((item) => item.quality),
+    [480, 480]
+  );
   await request(app).get('/api/source-batch').query({ season: 5, episodes: '11,12' }).expect(200);
   assert.ok(playerDataCalls <= 2);
   assert.ok(playlistCalls <= 2);
   await request(app).get('/api/source-batch').query({ season: 'x', episodes: '11,12' }).expect(400);
+  await request(app).get('/api/source-batch').query({ season: 5, episodes: '11,12', quality: 'bad' }).expect(400);
   await request(app).get('/api/source-batch').query({ season: 5, episodes: '' }).expect(400);
 });

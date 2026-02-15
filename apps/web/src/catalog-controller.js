@@ -188,6 +188,9 @@ export function createCatalogController(options) {
     }
     options.elements.episodeSelect.value = String(selected.episode);
     options.setStatus(`Selected Season ${selected.season}, episode ${selected.episode}`);
+    if (typeof options.setBackgroundStatus === 'function') {
+      options.setBackgroundStatus('');
+    }
     options.setProgress(0);
     options.setProgressText('');
   }
@@ -198,6 +201,9 @@ export function createCatalogController(options) {
     }
     setCurrentEpisode(selected.season, selected.episode, false);
     options.setStatus(`Selected Season ${selected.season}, episode ${selected.episode}`);
+    if (typeof options.setBackgroundStatus === 'function') {
+      options.setBackgroundStatus('');
+    }
     options.setProgress(0);
     options.setProgressText('');
   }
@@ -223,6 +229,9 @@ export function createCatalogController(options) {
           options.setStatus('Episodes refreshed');
         } else {
           options.setStatus(`Selected Season ${state.current.season}, episode ${state.current.episode}. Press Play.`);
+        }
+        if (typeof options.setBackgroundStatus === 'function') {
+          options.setBackgroundStatus('');
         }
       } else if (result.changed) {
         options.setStatus(`Episodes updated. Selected Season ${state.current.season}, episode ${state.current.episode}.`);

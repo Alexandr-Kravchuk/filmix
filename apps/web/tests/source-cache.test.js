@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readSourceUrl, writeSourceUrl, writeSourceUrls } from '../src/source-cache.js';
+import { buildSourceCacheKey, readSourceUrl, writeSourceUrl, writeSourceUrls } from '../src/source-cache.js';
 
 const TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -68,4 +68,10 @@ test('stores multiple source urls from batch payload', () => {
   } finally {
     globalThis.localStorage = originalStorage;
   }
+});
+
+test('builds source cache key with quality', () => {
+  assert.equal(buildSourceCacheKey(5, 11, 480), '5:11:480');
+  assert.equal(buildSourceCacheKey(5, 11, 'max'), '5:11:max');
+  assert.equal(buildSourceCacheKey(5, 11), '5:11:max');
 });

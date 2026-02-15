@@ -38,17 +38,21 @@ export async function fetchShow(options = {}) {
   }
   return fetchJson('/api/show');
 }
-export async function fetchSourceByEpisode(season, episode) {
-  return fetchJson('/api/source', { season, episode });
+export async function fetchSourceByEpisode(season, episode, quality = 'max') {
+  return fetchJson('/api/source', { season, episode, quality });
 }
-export async function fetchSourceBatch(season, episodes) {
+export async function fetchSourceBatch(season, episodes, quality = 'max') {
   const normalized = Array.from(new Set((Array.isArray(episodes) ? episodes : [])
     .map((value) => Number.parseInt(String(value), 10))
     .filter((value) => Number.isFinite(value) && value > 0)));
   return fetchJson('/api/source-batch', {
     season,
-    episodes: normalized.join(',')
+    episodes: normalized.join(','),
+    quality
   });
+}
+export async function fetchSourceLadder(season, episode) {
+  return fetchJson('/api/source-ladder', { season, episode });
 }
 export async function fetchPlaybackProgress() {
   return fetchJson('/api/progress');

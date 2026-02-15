@@ -54,6 +54,8 @@ Required values:
 Frontend build uses:
 
 - `VITE_API_BASE_URL`
+- `VITE_BOOTSTRAP_QUALITY` (default `480`)
+- `VITE_ENABLE_HD_UPGRADE` (default `true`)
 
 ## Local run
 
@@ -95,6 +97,7 @@ If source URL expires, export fresh `player-data` response (`text-*.txt` from Pr
 - `GET /api/fixed-episode`
 - `GET /api/source`
 - `GET /api/source?season=5&episode=11`
+- `GET /api/source-ladder?season=5&episode=11`
 - `GET /api/source-batch?season=5&episodes=11,12,13`
 - `POST /api/progress`
 - `GET /api/episode?season=1&episode=1`
@@ -109,11 +112,17 @@ If source URL expires, export fresh `player-data` response (`text-*.txt` from Pr
 
 - without query params returns fixed episode source
 - with `season` and `episode` returns source for selected episode
+- optional `quality` supports `max` or integer (`480`, `720`, `1080`)
 
 `/api/source-batch` returns source URLs for multiple episodes of one season:
 
-- request: `season` + `episodes` CSV
-- response: `{ season, items: [{ episode, sourceUrl, origin }], generatedAt }`
+- request: `season` + `episodes` CSV + optional `quality`
+- response: `{ season, items: [{ episode, sourceUrl, origin, quality }], generatedAt }`
+
+`/api/source-ladder` returns quality variants for a single episode:
+
+- request: `season` + `episode`
+- response: `{ season, episode, bootstrapQuality, maxQuality, sources: [{ quality, sourceUrl, origin }], generatedAt }`
 
 `/proxy/video-en` downloads source to local cache, remuxes to a single English audio track, then serves cached MP4 with `Range`.
 
@@ -174,6 +183,30 @@ Remote smoke check:
 node scripts/smoke-check.mjs \
   --api https://<render-domain> \
   --web https://<github-user>.github.io/<repo>/
+```
+
+## Startup benchmark
+
+Benchmark script runs cold and warm playback probes from a real browser and writes JSON results to `tmp/bench-results`.
+
+```bash
+npm run bench:startup -- \
+  --web https://<github-user>.github.io/<repo>/ \
+  --season 5 \
+  --episode 11
+```
+
+Defaults:
+
+- `cold=3`
+- `warm=5`
+- `channel=chrome`
+
+If Playwright is missing:
+
+```bash
+npm install -D playwright
+npx playwright install chromium
 ```
 
 ## GitHub Pages deployment

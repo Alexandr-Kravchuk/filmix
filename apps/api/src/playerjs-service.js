@@ -46,18 +46,41 @@ function parseQualityVariants(fileValue) {
   return variants;
 }
 
-function pickVariant(variants, preferredQuality) {
+function normalizeQualityPreference(preferredQuality) {
+  if (preferredQuality === undefined || preferredQuality === null || String(preferredQuality).trim() === '') {
+    return Number.MAX_SAFE_INTEGER;
+  }
+  const normalized = String(preferredQuality).trim().toLowerCase();
+  if (normalized === 'max' || normalized === 'highest' || normalized === 'best') {
+    return Number.MAX_SAFE_INTEGER;
+  }
+  const parsed = Number.parseInt(normalized, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return Number.MAX_SAFE_INTEGER;
+  }
+  return parsed;
+}
+function sortQualityAsc(variants) {
+  return [...variants].sort((a, b) => a.quality - b.quality);
+}
+export function pickVariant(variants, preferredQuality) {
   if (!variants.length) {
     return null;
   }
-  const preferred = Number.parseInt(String(preferredQuality || ''), 10);
-  if (Number.isFinite(preferred)) {
-    const exact = variants.find((item) => item.quality === preferred);
-    if (exact) {
-      return exact;
-    }
+  const preferred = normalizeQualityPreference(preferredQuality);
+  if (preferred === Number.MAX_SAFE_INTEGER) {
+    return sortQualityAsc(variants).at(-1);
   }
-  return [...variants].sort((a, b) => b.quality - a.quality)[0];
+  const sorted = sortQualityAsc(variants);
+  const exact = sorted.find((item) => item.quality === preferred);
+  if (exact) {
+    return exact;
+  }
+  const lower = [...sorted].reverse().find((item) => item.quality < preferred);
+  if (lower) {
+    return lower;
+  }
+  return sorted[0];
 }
 
 function parseEpisodeId(idValue) {
@@ -93,8 +116,13 @@ export function pickTranslation(videoTranslations, preferredTranslationPattern) 
 }
 
 export function findEpisodeSourceUrl(playlistJson, season, episode, preferredQuality) {
+  const variants = findEpisodeVariants(playlistJson, season, episode);
+  const selected = pickVariant(variants, preferredQuality);
+  return selected ? selected.url : null;
+}
+export function findEpisodeVariants(playlistJson, season, episode) {
   if (!Array.isArray(playlistJson)) {
-    return null;
+    return [];
   }
   for (const seasonEntry of playlistJson) {
     const folder = seasonEntry && Array.isArray(seasonEntry.folder) ? seasonEntry.folder : [];
@@ -106,12 +134,10 @@ export function findEpisodeSourceUrl(playlistJson, season, episode, preferredQua
       if (parsedId.season !== season || parsedId.episode !== episode) {
         continue;
       }
-      const variants = parseQualityVariants(episodeEntry.file);
-      const selected = pickVariant(variants, preferredQuality);
-      return selected ? selected.url : null;
+      return sortQualityAsc(parseQualityVariants(episodeEntry.file));
     }
   }
-  return null;
+  return [];
 }
 export function getVideoTranslations(playerData) {
   const translations = playerData && playerData.message && playerData.message.translations && playerData.message.translations.video
@@ -190,12 +216,15 @@ export async function resolveEpisodeSourceFromPlayerData(playerData, options = {
   }
   const { translationName, playlistUrl } = resolvePlaylistUrlFromPlayerData(playerData, options);
   const playlistJson = await fetchDecodedPlaylistJson(playlistUrl, options);
-  const sourceUrl = findEpisodeSourceUrl(playlistJson, season, episode, options.preferredQuality || 480);
-  if (!sourceUrl) {
+  const variants = findEpisodeVariants(playlistJson, season, episode);
+  const selected = pickVariant(variants, options.preferredQuality || Number.MAX_SAFE_INTEGER);
+  if (!selected || !selected.url) {
     throw new Error('episode source was not found in decoded playlist');
   }
   return {
-    sourceUrl,
+    sourceUrl: selected.url,
+    quality: selected.quality,
+    variants,
     playlistUrl,
     translationName
   };

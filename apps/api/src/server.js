@@ -123,6 +123,61 @@ function parseEpisodesCsv(value) {
     .map((part) => Number.parseInt(part.trim(), 10))
     .filter((part) => Number.isFinite(part) && part > 0))).sort((a, b) => a - b);
 }
+function parseQualityQuery(value, defaultValue = 'max') {
+  if (value === undefined || value === null || String(value).trim() === '') {
+    return defaultValue;
+  }
+  const normalized = String(value).trim().toLowerCase();
+  if (normalized === 'max' || normalized === 'highest' || normalized === 'best') {
+    return 'max';
+  }
+  const parsed = Number.parseInt(normalized, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+  return String(parsed);
+}
+function parseSourceQualityFromUrl(value) {
+  const url = String(value || '');
+  const match = url.match(/_(\d+)\.mp4(?:$|[?&#])/i);
+  if (!match) {
+    return 0;
+  }
+  const parsed = Number.parseInt(match[1], 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 0;
+  }
+  return parsed;
+}
+function pickSourceByQuality(sources, preferredQuality) {
+  const normalized = [...(Array.isArray(sources) ? sources : [])]
+    .filter((source) => source && typeof source.sourceUrl === 'string' && source.sourceUrl)
+    .map((source) => ({
+      quality: Number.isFinite(Number(source.quality)) ? Number.parseInt(String(source.quality), 10) : 0,
+      sourceUrl: source.sourceUrl,
+      origin: source.origin || ''
+    }))
+    .sort((a, b) => a.quality - b.quality);
+  if (!normalized.length) {
+    return null;
+  }
+  if (preferredQuality === 'max') {
+    return normalized.at(-1);
+  }
+  const target = Number.parseInt(String(preferredQuality || ''), 10);
+  if (!Number.isFinite(target) || target <= 0) {
+    return normalized.at(-1);
+  }
+  const exact = normalized.find((source) => source.quality === target);
+  if (exact) {
+    return exact;
+  }
+  const lower = [...normalized].reverse().find((source) => source.quality < target);
+  if (lower) {
+    return lower;
+  }
+  return normalized[0];
+}
 
 export function createApp(config) {
   const app = express();
@@ -219,7 +274,7 @@ export function createApp(config) {
     }
     return null;
   }
-  async function resolveCatalogSourceData(season, episode, context = {}) {
+  async function resolveCatalogLadderData(season, episode, context = {}) {
     let catalog = null;
     if (context && context.playerData) {
       const englishMap = await loadEnglishMap(mapPath);
@@ -238,9 +293,23 @@ export function createApp(config) {
       throw error;
     }
     return {
-      sourceUrl: source.sourceUrl,
+      sources: [{
+        quality: parseSourceQualityFromUrl(source.sourceUrl),
+        sourceUrl: source.sourceUrl,
+        origin: 'catalog'
+      }],
       origin: 'catalog'
     };
+  }
+  async function resolveCatalogSourceData(season, episode, context = {}, preferredQuality = 'max') {
+    const ladder = await resolveCatalogLadderData(season, episode, context);
+    const selected = pickSourceByQuality(ladder.sources, preferredQuality);
+    if (!selected) {
+      const error = new Error('Episode not found or no sources available');
+      error.statusCode = 404;
+      throw error;
+    }
+    return selected;
   }
   const sourceCacheService = createSourceCacheService({
     fetchPlayerData: async () => config.filmixClient.getPlayerData(),
@@ -251,13 +320,14 @@ export function createApp(config) {
     sourceCacheTtlMs,
     playlistCacheTtlMs,
     playerDataCacheTtlMs,
-    resolveCatalogSource: resolveCatalogSourceData
+    resolveCatalogSource: resolveCatalogSourceData,
+    resolveCatalogLadder: resolveCatalogLadderData
   });
-  async function resolveSourceDataForEpisode(season, episode) {
+  async function resolveSourceDataForEpisode(season, episode, preferredQuality = 'max') {
     if (season === fixedSeason && episode === fixedEpisode && (fixedLocalFilePath || fixedPublicMediaUrl || fixedEnglishSource)) {
       return resolveFixedSourceData();
     }
-    return sourceCacheService.resolveEpisodeSource(season, episode);
+    return sourceCacheService.resolveEpisodeSource(season, episode, preferredQuality);
   }
 
   async function sendLocalVideo(filePath, req, res) {
@@ -458,6 +528,11 @@ export function createApp(config) {
     try {
       const hasSeason = Object.hasOwn(req.query, 'season');
       const hasEpisode = Object.hasOwn(req.query, 'episode');
+      const preferredQuality = parseQualityQuery(req.query.quality, 'max');
+      if (!preferredQuality) {
+        res.status(400).json({ error: 'quality must be integer or "max"' });
+        return;
+      }
       if (!hasSeason && !hasEpisode) {
         const sourceData = await resolveFixedSourceData();
         setMetadataCacheHeader(res);
@@ -465,7 +540,8 @@ export function createApp(config) {
           season: fixedSeason,
           episode: fixedEpisode,
           sourceUrl: sourceData.sourceUrl,
-          origin: sourceData.origin
+          origin: sourceData.origin,
+          quality: parseSourceQualityFromUrl(sourceData.sourceUrl)
         });
         return;
       }
@@ -475,13 +551,56 @@ export function createApp(config) {
         res.status(400).json({ error: 'season and episode are required integers' });
         return;
       }
-      const sourceData = await resolveSourceDataForEpisode(season, episode);
+      const sourceData = await resolveSourceDataForEpisode(season, episode, preferredQuality);
       setMetadataCacheHeader(res);
       res.json({
         season,
         episode,
         sourceUrl: sourceData.sourceUrl,
-        origin: sourceData.origin
+        origin: sourceData.origin,
+        quality: sourceData.quality
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+  app.get('/api/source-ladder', async (req, res, next) => {
+    try {
+      const season = Number.parseInt(String(req.query.season || ''), 10);
+      const episode = Number.parseInt(String(req.query.episode || ''), 10);
+      if (!Number.isFinite(season) || season <= 0 || !Number.isFinite(episode) || episode <= 0) {
+        res.status(400).json({ error: 'season and episode are required integers' });
+        return;
+      }
+      if (season === fixedSeason && episode === fixedEpisode && (fixedLocalFilePath || fixedPublicMediaUrl || fixedEnglishSource)) {
+        const sourceData = await resolveFixedSourceData();
+        const quality = parseSourceQualityFromUrl(sourceData.sourceUrl);
+        setMetadataCacheHeader(res);
+        res.json({
+          season,
+          episode,
+          bootstrapQuality: 480,
+          maxQuality: quality,
+          sources: [{
+            quality,
+            sourceUrl: sourceData.sourceUrl,
+            origin: sourceData.origin
+          }],
+          generatedAt: Date.now()
+        });
+        return;
+      }
+      const ladder = await sourceCacheService.resolveEpisodeSourceLadder(season, episode);
+      const normalizedSources = [...(Array.isArray(ladder.sources) ? ladder.sources : [])].sort((a, b) => a.quality - b.quality);
+      const maxQualitySource = pickSourceByQuality(normalizedSources, 'max');
+      setMetadataCacheHeader(res);
+      res.json({
+        season,
+        episode,
+        bootstrapQuality: 480,
+        maxQuality: maxQualitySource ? maxQualitySource.quality : 0,
+        sources: normalizedSources,
+        generatedAt: Date.now()
       });
     } catch (error) {
       next(error);
@@ -491,6 +610,7 @@ export function createApp(config) {
     try {
       const season = Number.parseInt(String(req.query.season || ''), 10);
       const episodes = parseEpisodesCsv(req.query.episodes);
+      const preferredQuality = parseQualityQuery(req.query.quality, 'max');
       if (!Number.isFinite(season) || season <= 0) {
         res.status(400).json({ error: 'season is required integer' });
         return;
@@ -499,7 +619,11 @@ export function createApp(config) {
         res.status(400).json({ error: 'episodes must be a comma-separated integer list' });
         return;
       }
-      const items = await sourceCacheService.resolveEpisodeSourcesBatch(season, episodes);
+      if (!preferredQuality) {
+        res.status(400).json({ error: 'quality must be integer or "max"' });
+        return;
+      }
+      const items = await sourceCacheService.resolveEpisodeSourcesBatch(season, episodes, preferredQuality);
       setMetadataCacheHeader(res);
       res.json({
         season,

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fetchShow, fetchSourceByEpisode, fetchSourceBatch, fetchPlaybackProgress, savePlaybackProgress, sendPlaybackProgressBeacon, getApiBaseUrl } from '../src/api.js';
+import { fetchShow, fetchSourceByEpisode, fetchSourceBatch, fetchSourceLadder, fetchPlaybackProgress, savePlaybackProgress, sendPlaybackProgressBeacon, getApiBaseUrl } from '../src/api.js';
 
 test('uses localhost api base by default', () => {
   assert.equal(getApiBaseUrl(), 'http://localhost:3000');
@@ -14,6 +14,9 @@ test('exports episode source loader', () => {
 });
 test('exports source batch loader', () => {
   assert.equal(typeof fetchSourceBatch, 'function');
+});
+test('exports source ladder loader', () => {
+  assert.equal(typeof fetchSourceLadder, 'function');
 });
 
 test('sends force query when loading show with force option', async () => {
@@ -72,11 +75,51 @@ test('loads source batch with season and episodes csv', async () => {
     };
   };
   try {
-    await fetchSourceBatch(5, [11, 12, 12, '13']);
+    await fetchSourceBatch(5, [11, 12, 12, '13'], 480);
   } finally {
     globalThis.fetch = originalFetch;
   }
-  assert.match(calledUrl, /\/api\/source-batch\?season=5&episodes=11%2C12%2C13$/);
+  assert.match(calledUrl, /\/api\/source-batch\?season=5&episodes=11%2C12%2C13&quality=480$/);
+});
+
+test('loads source by episode with quality', async () => {
+  const originalFetch = globalThis.fetch;
+  let calledUrl = '';
+  globalThis.fetch = async (url) => {
+    calledUrl = String(url);
+    return {
+      ok: true,
+      async json() {
+        return {};
+      }
+    };
+  };
+  try {
+    await fetchSourceByEpisode(5, 11, 'max');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.match(calledUrl, /\/api\/source\?season=5&episode=11&quality=max$/);
+});
+
+test('loads source ladder for episode', async () => {
+  const originalFetch = globalThis.fetch;
+  let calledUrl = '';
+  globalThis.fetch = async (url) => {
+    calledUrl = String(url);
+    return {
+      ok: true,
+      async json() {
+        return {};
+      }
+    };
+  };
+  try {
+    await fetchSourceLadder(5, 11);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.match(calledUrl, /\/api\/source-ladder\?season=5&episode=11$/);
 });
 
 test('saves playback progress with json payload', async () => {

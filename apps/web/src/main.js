@@ -6,9 +6,33 @@ import { createTaskQueue } from './task-queue.js';
 import { createProgressSyncController } from './progress-sync.js';
 import { createPlaybackController } from './playback-controller.js';
 
+function parseBooleanEnv(value, fallback = true) {
+  if (value === undefined || value === null || String(value).trim() === '') {
+    return fallback;
+  }
+  const normalized = String(value).trim().toLowerCase();
+  if (normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on') {
+    return true;
+  }
+  if (normalized === '0' || normalized === 'false' || normalized === 'no' || normalized === 'off') {
+    return false;
+  }
+  return fallback;
+}
+function parseBootstrapQuality(value) {
+  const parsed = Number.parseInt(String(value || '480'), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 480;
+  }
+  return parsed;
+}
+
+const bootstrapQuality = parseBootstrapQuality(import.meta.env.VITE_BOOTSTRAP_QUALITY);
+const enableHdUpgrade = parseBooleanEnv(import.meta.env.VITE_ENABLE_HD_UPGRADE, true);
 const elements = {
   showTitle: document.getElementById('show-title'),
   status: document.getElementById('status'),
+  backgroundStatus: document.getElementById('background-status'),
   seasonSelect: document.getElementById('season-select'),
   episodeSelect: document.getElementById('episode-select'),
   playButton: document.getElementById('play-btn'),
@@ -19,15 +43,19 @@ const elements = {
   menuPanel: document.getElementById('menu-panel'),
   refreshEpisodesButton: document.getElementById('refresh-episodes-btn')
 };
-
 const state = {
   isBusy: false,
-  isMenuOpen: false
+  isMenuOpen: false,
+  qualityStage: 'idle'
 };
 
 function setStatus(message, isError = false) {
   elements.status.textContent = message;
   elements.status.classList.toggle('error', isError);
+}
+function setBackgroundStatus(message, isError = false) {
+  elements.backgroundStatus.textContent = message;
+  elements.backgroundStatus.classList.toggle('error', isError);
 }
 function setProgress(value) {
   const normalized = Math.max(0, Math.min(1, Number(value) || 0));
@@ -83,6 +111,9 @@ function setBusy(isBusy) {
     elements.playButton.textContent = 'Play';
   }
 }
+function setQualityStage(stage) {
+  state.qualityStage = stage;
+}
 function scheduleFfmpegWarmup() {
   const run = () => {
     taskQueue.warmup();
@@ -97,9 +128,9 @@ function scheduleFfmpegWarmup() {
 const taskQueue = createTaskQueue({
   fetchSourceByEpisode,
   fetchSourceBatch,
-  getApiBaseUrl
+  getApiBaseUrl,
+  bootstrapQuality
 });
-
 const catalog = createCatalogController({
   elements,
   fetchShow,
@@ -107,6 +138,7 @@ const catalog = createCatalogController({
   writeShowCache,
   clearShowCache,
   setStatus,
+  setBackgroundStatus,
   setBusy,
   setProgress,
   setProgressText,
@@ -114,7 +146,6 @@ const catalog = createCatalogController({
     taskQueue.trimPreparedEntries(current, next);
   }
 });
-
 const progressSync = createProgressSyncController({
   video: elements.video,
   getCurrentEpisode: () => catalog.getCurrentEpisode(),
@@ -127,18 +158,21 @@ const progressSync = createProgressSyncController({
   savePlaybackProgress,
   sendPlaybackProgressBeacon
 });
-
 const playback = createPlaybackController({
   elements,
   catalog,
   taskQueue,
   progressSync,
   setStatus,
+  setBackgroundStatus,
   setBusy,
   setProgress,
   setProgressText,
+  setQualityStage,
   formatEpisodeLabel,
-  formatClock
+  formatClock,
+  getBootstrapQuality: () => bootstrapQuality,
+  isHdUpgradeEnabled: () => enableHdUpgrade
 });
 
 async function refreshEpisodes(force = false) {
@@ -172,6 +206,7 @@ function onDocumentKeydown(event) {
 async function init() {
   setProgress(0);
   setProgressText('');
+  setBackgroundStatus(enableHdUpgrade ? `Two-stage mode: ${bootstrapQuality}p -> max` : 'Single-stage mode: max only');
   setBusy(true);
   const loadedFromCache = catalog.tryLoadCatalogFromCache();
   if (loadedFromCache) {
