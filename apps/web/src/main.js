@@ -1,7 +1,7 @@
 import './styles.css';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { toBlobURL } from '@ffmpeg/util';
-import { fetchShow, fetchSourceByEpisode, getApiBaseUrl } from './api.js';
+import { fetchShow, fetchSourceByEpisode, fetchPlaybackProgress, savePlaybackProgress, sendPlaybackProgressBeacon, getApiBaseUrl } from './api.js';
 import { readShowCache, writeShowCache, clearShowCache } from './show-cache.js';
 
 const CORE_BASE_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm';
@@ -31,7 +31,11 @@ const state = {
   coreAssetPromise: null,
   isBusy: false,
   playRequestId: 0,
-  isMenuOpen: false
+  isMenuOpen: false,
+  resumeProgress: null,
+  progressSyncTimer: null,
+  progressSyncInFlight: null,
+  lastProgressSignature: ''
 };
 
 function setStatus(message, isError = false) {
@@ -92,6 +96,16 @@ function buildEpisodeKey(season, episode) {
 
 function formatEpisodeLabel(season, episode) {
   return `Season ${season}, episode ${episode}`;
+}
+function formatClock(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  }
+  return `${minutes}:${String(secs).padStart(2, '0')}`;
 }
 
 function toSortedNumbers(values) {
@@ -256,6 +270,178 @@ function getNextEpisode(season, episode) {
     }
   }
   return null;
+}
+function normalizePlaybackProgress(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+  const season = Number.parseInt(String(payload.season || ''), 10);
+  const episode = Number.parseInt(String(payload.episode || ''), 10);
+  const currentTimeRaw = Number(payload.currentTime);
+  const durationRaw = Number(payload.duration);
+  const updatedAtRaw = Number.parseInt(String(payload.updatedAt || ''), 10);
+  if (!Number.isFinite(season) || season <= 0 || !Number.isFinite(episode) || episode <= 0) {
+    return null;
+  }
+  if (!Number.isFinite(currentTimeRaw) || currentTimeRaw < 0) {
+    return null;
+  }
+  const duration = Number.isFinite(durationRaw) && durationRaw >= 0 ? durationRaw : 0;
+  const currentTime = duration > 0 ? Math.min(currentTimeRaw, duration) : currentTimeRaw;
+  const updatedAt = Number.isFinite(updatedAtRaw) && updatedAtRaw > 0 ? updatedAtRaw : Date.now();
+  return {
+    season,
+    episode,
+    currentTime,
+    duration,
+    updatedAt
+  };
+}
+function buildProgressSignature(progress) {
+  return [
+    Number.parseInt(String(progress.season), 10),
+    Number.parseInt(String(progress.episode), 10),
+    Math.floor(Number(progress.currentTime) || 0),
+    Math.floor(Number(progress.duration) || 0)
+  ].join(':');
+}
+function getResumeTimeForEpisode(season, episode) {
+  if (!state.resumeProgress) {
+    return 0;
+  }
+  if (state.resumeProgress.season !== season || state.resumeProgress.episode !== episode) {
+    return 0;
+  }
+  return Number(state.resumeProgress.currentTime) || 0;
+}
+function getPlaybackProgressPayload() {
+  if (!Number.isFinite(state.current.season) || !Number.isFinite(state.current.episode)) {
+    return null;
+  }
+  const activeSrc = String(elements.video.currentSrc || elements.video.src || '').trim();
+  if (!activeSrc) {
+    return null;
+  }
+  const currentTimeRaw = Number(elements.video.currentTime || 0);
+  if (!Number.isFinite(currentTimeRaw) || currentTimeRaw < 0) {
+    return null;
+  }
+  const durationRaw = Number(elements.video.duration || 0);
+  const duration = Number.isFinite(durationRaw) && durationRaw > 0 ? durationRaw : 0;
+  const currentTime = duration > 0 ? Math.min(currentTimeRaw, duration) : currentTimeRaw;
+  return {
+    season: state.current.season,
+    episode: state.current.episode,
+    currentTime: Number(currentTime.toFixed(3)),
+    duration: Number(duration.toFixed(3)),
+    updatedAt: Date.now()
+  };
+}
+async function syncPlaybackProgress(options = {}) {
+  if (state.progressSyncInFlight) {
+    return state.progressSyncInFlight;
+  }
+  const payload = getPlaybackProgressPayload();
+  if (!payload) {
+    return null;
+  }
+  const force = !!options.force;
+  const signature = buildProgressSignature(payload);
+  if (!force && signature === state.lastProgressSignature) {
+    return null;
+  }
+  const task = (async () => {
+    const saved = await savePlaybackProgress(payload, {
+      keepalive: !!options.keepalive
+    });
+    const normalized = normalizePlaybackProgress(saved);
+    if (normalized) {
+      state.resumeProgress = normalized;
+      state.lastProgressSignature = buildProgressSignature(normalized);
+      return normalized;
+    }
+    state.lastProgressSignature = signature;
+    return payload;
+  })().catch(() => null);
+  state.progressSyncInFlight = task;
+  try {
+    return await task;
+  } finally {
+    if (state.progressSyncInFlight === task) {
+      state.progressSyncInFlight = null;
+    }
+  }
+}
+function syncPlaybackProgressOnClose() {
+  const payload = getPlaybackProgressPayload();
+  if (!payload) {
+    return;
+  }
+  state.lastProgressSignature = buildProgressSignature(payload);
+  if (sendPlaybackProgressBeacon(payload)) {
+    return;
+  }
+  void savePlaybackProgress(payload, { keepalive: true }).catch(() => {
+  });
+}
+function startProgressSyncTimer() {
+  if (state.progressSyncTimer) {
+    return;
+  }
+  state.progressSyncTimer = globalThis.setInterval(() => {
+    void syncPlaybackProgress();
+  }, 60000);
+}
+async function restorePlaybackProgress() {
+  if (!state.catalog) {
+    return;
+  }
+  try {
+    const payload = await fetchPlaybackProgress();
+    const progress = normalizePlaybackProgress(payload);
+    if (!progress) {
+      return;
+    }
+    const episodes = getEpisodes(progress.season);
+    if (!episodes.includes(progress.episode)) {
+      return;
+    }
+    setCurrentEpisode(progress.season, progress.episode, true);
+    state.resumeProgress = progress;
+    state.lastProgressSignature = buildProgressSignature(progress);
+    if (progress.currentTime > 0) {
+      setStatus(`Resume available: ${formatEpisodeLabel(progress.season, progress.episode)} at ${formatClock(progress.currentTime)}. Press Play.`);
+      return;
+    }
+    setStatus(`Resume available: ${formatEpisodeLabel(progress.season, progress.episode)}. Press Play.`);
+  } catch {
+  }
+}
+async function seekVideoTo(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value <= 0) {
+    return;
+  }
+  const video = elements.video;
+  const applySeek = () => {
+    const duration = Number(video.duration || 0);
+    if (Number.isFinite(duration) && duration > 1) {
+      video.currentTime = Math.min(value, Math.max(0, duration - 1));
+      return;
+    }
+    video.currentTime = value;
+  };
+  if (video.readyState >= 1) {
+    applySeek();
+    return;
+  }
+  await new Promise((resolve) => {
+    const onLoadedMetadata = () => {
+      applySeek();
+      resolve();
+    };
+    video.addEventListener('loadedmetadata', onLoadedMetadata, { once: true });
+  });
 }
 
 function trimPreparedEntries() {
@@ -600,13 +786,22 @@ async function prepareEpisodeForeground(season, episode, requestId) {
 }
 
 async function startPlayback(entry, isAutoStart) {
+  const resumeTime = getResumeTimeForEpisode(entry.season, entry.episode);
   const activeSrc = String(elements.video.currentSrc || elements.video.src || '');
-  if (activeSrc !== entry.playUrl) {
+  const sourceChanged = activeSrc !== entry.playUrl;
+  if (sourceChanged) {
     elements.video.src = entry.playUrl;
     elements.video.load();
   }
+  if (sourceChanged && resumeTime > 0) {
+    await seekVideoTo(resumeTime);
+  }
   try {
     await elements.video.play();
+    if (resumeTime > 0) {
+      setStatus(`Playing ${formatEpisodeLabel(entry.season, entry.episode)} from ${formatClock(resumeTime)} (English)`);
+      return;
+    }
     setStatus(`Playing ${formatEpisodeLabel(entry.season, entry.episode)} (English)`);
   } catch {
     if (isAutoStart) {
@@ -697,9 +892,11 @@ function onEpisodeChange() {
 async function onVideoEnded() {
   const next = getNextEpisode(state.current.season, state.current.episode);
   if (!next) {
+    await syncPlaybackProgress({ force: true });
     setStatus('Last available episode finished');
     return;
   }
+  await syncPlaybackProgress({ force: true });
   setCurrentEpisode(next.season, next.episode, true);
   setStatus(`Auto-playing ${formatEpisodeLabel(next.season, next.episode)}`);
   await playSelectedEpisode(true);
@@ -817,6 +1014,10 @@ async function init() {
       setStatus('Using cached episodes. Background refresh failed.', true);
     }
   }
+  if (state.catalog) {
+    await restorePlaybackProgress();
+    startProgressSyncTimer();
+  }
   if (!state.catalog) {
     setBusy(false);
   }
@@ -830,6 +1031,9 @@ elements.playButton.addEventListener('click', () => {
 elements.video.addEventListener('ended', () => {
   void onVideoEnded();
 });
+elements.video.addEventListener('pause', () => {
+  void syncPlaybackProgress({ force: true });
+});
 elements.menuButton.addEventListener('click', () => {
   toggleMenu();
 });
@@ -838,5 +1042,11 @@ elements.refreshEpisodesButton.addEventListener('click', () => {
 });
 document.addEventListener('click', onDocumentClick);
 document.addEventListener('keydown', onDocumentKeydown);
+globalThis.addEventListener('beforeunload', () => {
+  syncPlaybackProgressOnClose();
+});
+globalThis.addEventListener('pagehide', () => {
+  syncPlaybackProgressOnClose();
+});
 
 void init();

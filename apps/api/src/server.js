@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { createReadStream } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { stat, mkdir, readFile, writeFile } from 'node:fs/promises';
 import dotenv from 'dotenv';
 import express from 'express';
 import { FilmixClient } from './filmix-client.js';
@@ -68,6 +68,41 @@ function escapeHtml(value) {
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
 }
+function normalizePlaybackProgress(value) {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const season = Number.parseInt(String(value.season || ''), 10);
+  const episode = Number.parseInt(String(value.episode || ''), 10);
+  const currentTimeRaw = Number(value.currentTime);
+  const durationRaw = Number(value.duration);
+  const updatedAtRaw = Number.parseInt(String(value.updatedAt || ''), 10);
+  if (!Number.isFinite(season) || season <= 0 || !Number.isFinite(episode) || episode <= 0) {
+    return null;
+  }
+  if (!Number.isFinite(currentTimeRaw) || currentTimeRaw < 0) {
+    return null;
+  }
+  const duration = Number.isFinite(durationRaw) && durationRaw >= 0 ? durationRaw : 0;
+  const currentTime = duration > 0 ? Math.min(currentTimeRaw, duration) : currentTimeRaw;
+  const updatedAt = Number.isFinite(updatedAtRaw) && updatedAtRaw > 0 ? updatedAtRaw : Date.now();
+  return {
+    season,
+    episode,
+    currentTime: Number(currentTime.toFixed(3)),
+    duration: Number(duration.toFixed(3)),
+    updatedAt
+  };
+}
+function getEmptyPlaybackProgress() {
+  return {
+    season: null,
+    episode: null,
+    currentTime: 0,
+    duration: 0,
+    updatedAt: 0
+  };
+}
 
 export function createApp(config) {
   const app = express();
@@ -82,8 +117,12 @@ export function createApp(config) {
   const fixedPublicMediaViaProxy = config.fixedPublicMediaViaProxy !== false;
   const fixedQuality = Number.parseInt(String(config.fixedQuality || '480'), 10);
   const preferredTranslationPattern = config.preferredTranslationPattern || 'ukr|укра';
+  const playbackProgressPath = config.playbackProgressPath || '/tmp/filmix-playback-progress.json';
   const playlistFetch = config.playlistFetch || fetch;
   let cache = null;
+  let playbackProgress = null;
+  let playbackProgressLoaded = false;
+  let playbackProgressLoadPromise = null;
 
   function toProxyPlayUrl(sourceUrl) {
     return `/proxy/video?src=${encodeURIComponent(sourceUrl)}`;
@@ -243,6 +282,42 @@ export function createApp(config) {
   function resetCache() {
     cache = null;
   }
+  async function loadPlaybackProgressFromDisk() {
+    try {
+      const raw = await readFile(playbackProgressPath, 'utf8');
+      const parsed = JSON.parse(raw);
+      return normalizePlaybackProgress(parsed);
+    } catch (error) {
+      if (error && error.code === 'ENOENT') {
+        return null;
+      }
+      return null;
+    }
+  }
+  async function ensurePlaybackProgressLoaded() {
+    if (playbackProgressLoaded) {
+      return;
+    }
+    if (playbackProgressLoadPromise) {
+      await playbackProgressLoadPromise;
+      return;
+    }
+    playbackProgressLoadPromise = (async () => {
+      playbackProgress = await loadPlaybackProgressFromDisk();
+      playbackProgressLoaded = true;
+    })();
+    try {
+      await playbackProgressLoadPromise;
+    } finally {
+      playbackProgressLoadPromise = null;
+    }
+  }
+  async function persistPlaybackProgress(progress) {
+    playbackProgress = progress;
+    const dir = path.dirname(playbackProgressPath);
+    await mkdir(dir, { recursive: true });
+    await writeFile(playbackProgressPath, `${JSON.stringify(progress)}\n`, 'utf8');
+  }
 
   app.use(express.json({ limit: '30mb' }));
 
@@ -270,6 +345,32 @@ export function createApp(config) {
       ok: true,
       version: config.version || 'dev'
     });
+  });
+  app.get('/api/progress', async (req, res, next) => {
+    try {
+      await ensurePlaybackProgressLoaded();
+      res.json(playbackProgress || getEmptyPlaybackProgress());
+    } catch (error) {
+      next(error);
+    }
+  });
+  app.post('/api/progress', async (req, res, next) => {
+    try {
+      const nextProgress = normalizePlaybackProgress(req.body);
+      if (!nextProgress) {
+        res.status(400).json({ error: 'Invalid progress payload' });
+        return;
+      }
+      await ensurePlaybackProgressLoaded();
+      if (playbackProgress && nextProgress.updatedAt < playbackProgress.updatedAt) {
+        res.json(playbackProgress);
+        return;
+      }
+      await persistPlaybackProgress(nextProgress);
+      res.json(playbackProgress);
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.get('/api/show', async (req, res, next) => {
@@ -505,6 +606,7 @@ export function createRuntimeConfig() {
     fixedPublicMediaViaProxy: parseBoolean(process.env.FIXED_PUBLIC_MEDIA_VIA_PROXY, true),
     fixedQuality: parsePreferredQuality(process.env.FIXED_QUALITY || 'max'),
     preferredTranslationPattern: process.env.FILMIX_PREFERRED_TRANSLATION_PATTERN || 'ukr|укра',
+    playbackProgressPath: process.env.PLAYBACK_PROGRESS_PATH || '/tmp/filmix-playback-progress.json',
     pageUrl,
     userAgent,
     mediaCacheDir: process.env.MEDIA_CACHE_DIR || '/tmp/filmix-cache',

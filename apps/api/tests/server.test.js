@@ -302,3 +302,67 @@ test('forces /api/show catalog rebuild when force query is enabled', async () =>
   await request(app).get('/api/show').query({ force: 1 }).expect(200);
   assert.equal(calls, 2);
 });
+
+test('stores and returns playback progress across app instances', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'filmix-api-test-progress-'));
+  const progressPath = path.join(tempDir, 'playback-progress.json');
+  const app = createApp({
+    corsOrigin: 'http://localhost:5173',
+    showTitle: 'PAW Patrol',
+    fixedSeason: 5,
+    fixedEpisode: 11,
+    playbackProgressPath: progressPath,
+    pageUrl: 'https://filmix.zip/multser/detskij/87660-v-schenyachiy-patrul-chas-2013.html',
+    userAgent: 'TestAgent',
+    version: 'test',
+    filmixClient: {
+      async getPlayerData() {
+        return playerDataFixture;
+      }
+    }
+  });
+  const empty = await request(app).get('/api/progress').expect(200);
+  assert.equal(empty.body.season, null);
+  assert.equal(empty.body.episode, null);
+  assert.equal(empty.body.currentTime, 0);
+  assert.equal(empty.body.duration, 0);
+  assert.equal(empty.body.updatedAt, 0);
+  await request(app)
+    .post('/api/progress')
+    .send({ season: 5, episode: 11, currentTime: 75.25, duration: 1391, updatedAt: 100 })
+    .expect(200);
+  const saved = await request(app).get('/api/progress').expect(200);
+  assert.equal(saved.body.season, 5);
+  assert.equal(saved.body.episode, 11);
+  assert.equal(saved.body.currentTime, 75.25);
+  assert.equal(saved.body.duration, 1391);
+  assert.equal(saved.body.updatedAt, 100);
+  const ignoredOlder = await request(app)
+    .post('/api/progress')
+    .send({ season: 5, episode: 10, currentTime: 10, duration: 100, updatedAt: 50 })
+    .expect(200);
+  assert.equal(ignoredOlder.body.season, 5);
+  assert.equal(ignoredOlder.body.episode, 11);
+  const appReloaded = createApp({
+    corsOrigin: 'http://localhost:5173',
+    showTitle: 'PAW Patrol',
+    fixedSeason: 5,
+    fixedEpisode: 11,
+    playbackProgressPath: progressPath,
+    pageUrl: 'https://filmix.zip/multser/detskij/87660-v-schenyachiy-patrul-chas-2013.html',
+    userAgent: 'TestAgent',
+    version: 'test',
+    filmixClient: {
+      async getPlayerData() {
+        return playerDataFixture;
+      }
+    }
+  });
+  const persisted = await request(appReloaded).get('/api/progress').expect(200);
+  assert.equal(persisted.body.season, 5);
+  assert.equal(persisted.body.episode, 11);
+  assert.equal(persisted.body.currentTime, 75.25);
+  assert.equal(persisted.body.duration, 1391);
+  assert.equal(persisted.body.updatedAt, 100);
+  await request(appReloaded).post('/api/progress').send({ season: 'x', episode: 11, currentTime: 5 }).expect(400);
+});

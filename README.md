@@ -46,6 +46,7 @@ Required values:
 - `FIXED_LOCAL_FILE_PATH` (optional absolute path to local MP4; highest priority for fixed-episode mode)
 - `FIXED_PUBLIC_MEDIA_URL` (optional public S3/R2 URL for deploy mode)
 - `FIXED_PUBLIC_MEDIA_VIA_PROXY` (`true` or `false`, default `true`)
+- `PLAYBACK_PROGRESS_PATH` (default `/tmp/filmix-playback-progress.json`)
 
 Frontend build uses:
 
@@ -87,9 +88,11 @@ If source URL expires, export fresh `player-data` response (`text-*.txt` from Pr
 
 - `GET /api/health`
 - `GET /api/show`
+- `GET /api/progress`
 - `GET /api/fixed-episode`
 - `GET /api/source`
 - `GET /api/source?season=5&episode=11`
+- `POST /api/progress`
 - `GET /api/episode?season=1&episode=1`
 - `GET /api/play`
 - `GET /api/play?season=1&episode=1&lang=en`
@@ -104,6 +107,8 @@ If source URL expires, export fresh `player-data` response (`text-*.txt` from Pr
 - with `season` and `episode` returns source for selected episode
 
 `/proxy/video-en` downloads source to local cache, remuxes to a single English audio track, then serves cached MP4 with `Range`.
+
+`/api/progress` stores shared resume position (`season`, `episode`, `currentTime`, `duration`, `updatedAt`) so playback can continue from another device.
 
 Priority for fixed episode source:
 
