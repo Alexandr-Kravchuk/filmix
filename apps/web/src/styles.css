@@ -29,6 +29,62 @@ body {
   margin: 0;
   font-size: 1.6rem;
 }
+.header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.menu-wrap {
+  position: relative;
+}
+.menu-btn {
+  width: 30px;
+  height: 30px;
+  border: 1px solid #486383;
+  border-radius: 8px;
+  background: #34485f;
+  color: #e6eef9;
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.menu-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.menu-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  min-width: 190px;
+  background: #1f2b39;
+  border: 1px solid #3c4f66;
+  border-radius: 10px;
+  padding: 6px;
+  display: grid;
+  z-index: 10;
+}
+.menu-item {
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  padding: 8px 10px;
+  font: inherit;
+  cursor: pointer;
+}
+.menu-item:hover {
+  background: #34485f;
+}
+.menu-item:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 .status {
   margin: 8px 0 0;
   color: var(--muted);

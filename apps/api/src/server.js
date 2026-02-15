@@ -274,7 +274,8 @@ export function createApp(config) {
 
   app.get('/api/show', async (req, res, next) => {
     try {
-      const catalog = await buildCatalogSnapshot();
+      const force = parseBoolean(req.query.force, false);
+      const catalog = await buildCatalogSnapshot(force);
       res.json({
         title: catalog.title,
         seasons: catalog.seasons,

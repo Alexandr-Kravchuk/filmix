@@ -2,9 +2,10 @@ import './styles.css';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { toBlobURL } from '@ffmpeg/util';
 import { fetchShow, fetchSourceByEpisode, getApiBaseUrl } from './api.js';
+import { readShowCache, writeShowCache, clearShowCache } from './show-cache.js';
 
 const CORE_BASE_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm';
-const MAX_SOURCE_BYTES = 300 * 1024 * 1024;
+const MAX_SOURCE_BYTES = 1024 * 1024 * 1024;
 const OUTPUT_CACHE_NAME = 'filmix-en-track-cache-v1';
 
 const elements = {
@@ -15,17 +16,22 @@ const elements = {
   playButton: document.getElementById('play-btn'),
   progress: document.getElementById('progress'),
   progressText: document.getElementById('progress-text'),
-  video: document.getElementById('video')
+  video: document.getElementById('video'),
+  menuButton: document.getElementById('menu-btn'),
+  menuPanel: document.getElementById('menu-panel'),
+  refreshEpisodesButton: document.getElementById('refresh-episodes-btn')
 };
 
 const state = {
   catalog: null,
+  catalogFingerprint: '',
   current: { season: 0, episode: 0 },
   prepared: new Map(),
   tasks: new Map(),
   coreAssetPromise: null,
   isBusy: false,
-  playRequestId: 0
+  playRequestId: 0,
+  isMenuOpen: false
 };
 
 function setStatus(message, isError = false) {
@@ -33,11 +39,39 @@ function setStatus(message, isError = false) {
   elements.status.classList.toggle('error', isError);
 }
 
+function closeMenu() {
+  state.isMenuOpen = false;
+  elements.menuPanel.hidden = true;
+  elements.menuButton.setAttribute('aria-expanded', 'false');
+}
+
+function openMenu() {
+  if (elements.menuButton.disabled) {
+    return;
+  }
+  state.isMenuOpen = true;
+  elements.menuPanel.hidden = false;
+  elements.menuButton.setAttribute('aria-expanded', 'true');
+}
+
+function toggleMenu() {
+  if (state.isMenuOpen) {
+    closeMenu();
+    return;
+  }
+  openMenu();
+}
+
 function setBusy(isBusy) {
   state.isBusy = isBusy;
   elements.seasonSelect.disabled = isBusy;
   elements.episodeSelect.disabled = isBusy;
   elements.playButton.disabled = isBusy || !state.catalog;
+  elements.menuButton.disabled = isBusy;
+  elements.refreshEpisodesButton.disabled = isBusy;
+  if (isBusy) {
+    closeMenu();
+  }
   if (!isBusy) {
     elements.playButton.textContent = 'Play';
   }
@@ -94,29 +128,39 @@ function normalizeCatalog(payload) {
   };
 }
 
-function getEpisodes(season) {
-  return state.catalog && state.catalog.episodesBySeason[season] ? state.catalog.episodesBySeason[season] : [];
+function buildCatalogFingerprint(catalog) {
+  return JSON.stringify({
+    title: catalog.title,
+    seasons: catalog.seasons,
+    episodesBySeason: catalog.episodesBySeason,
+    fixed: catalog.fixed
+  });
 }
 
-function findInitialEpisode() {
-  if (!state.catalog || !state.catalog.seasons.length) {
-    return null;
-  }
-  if (state.catalog.fixed) {
-    const episodes = getEpisodes(state.catalog.fixed.season);
-    if (episodes.includes(state.catalog.fixed.episode)) {
-      return {
-        season: state.catalog.fixed.season,
-        episode: state.catalog.fixed.episode
-      };
+function getEpisodes(season, catalog = state.catalog) {
+  return catalog && catalog.episodesBySeason[season] ? catalog.episodesBySeason[season] : [];
+}
+
+function resolveEpisodeSelection(catalog, preferredEpisode) {
+  if (preferredEpisode && Number.isFinite(preferredEpisode.season) && Number.isFinite(preferredEpisode.episode)) {
+    const preferredEpisodes = getEpisodes(preferredEpisode.season, catalog);
+    if (preferredEpisodes.includes(preferredEpisode.episode)) {
+      return { season: preferredEpisode.season, episode: preferredEpisode.episode };
     }
   }
-  const season = state.catalog.seasons[0];
-  const episodes = getEpisodes(season);
-  if (!episodes.length) {
-    return null;
+  if (catalog.fixed) {
+    const fixedEpisodes = getEpisodes(catalog.fixed.season, catalog);
+    if (fixedEpisodes.includes(catalog.fixed.episode)) {
+      return { season: catalog.fixed.season, episode: catalog.fixed.episode };
+    }
   }
-  return { season, episode: episodes[0] };
+  for (const season of catalog.seasons) {
+    const episodes = getEpisodes(season, catalog);
+    if (episodes.length) {
+      return { season, episode: episodes[0] };
+    }
+  }
+  return null;
 }
 
 function renderSeasonOptions(selectedSeason) {
@@ -150,6 +194,36 @@ function setCurrentEpisode(season, episode, syncControls = true) {
     elements.episodeSelect.value = String(episode);
   }
   trimPreparedEntries();
+}
+
+function applyCatalogPayload(payload, options = {}) {
+  const preserveSelection = options.preserveSelection !== false;
+  const preferredEpisode = options.preferredEpisode || (preserveSelection ? { ...state.current } : null);
+  const nextCatalog = normalizeCatalog(payload);
+  const nextFingerprint = buildCatalogFingerprint(nextCatalog);
+  const hasCurrentCatalog = !!state.catalog;
+  if (hasCurrentCatalog && nextFingerprint === state.catalogFingerprint) {
+    return {
+      changed: false,
+      selected: { ...state.current }
+    };
+  }
+  const selected = resolveEpisodeSelection(nextCatalog, preferredEpisode);
+  if (!selected) {
+    throw new Error('No episodes available in catalog');
+  }
+  state.catalog = nextCatalog;
+  state.catalogFingerprint = nextFingerprint;
+  elements.showTitle.textContent = `${state.catalog.title} English Player`;
+  renderSeasonOptions(selected.season);
+  renderEpisodeOptions(selected.season, selected.episode);
+  setCurrentEpisode(selected.season, selected.episode, false);
+  elements.seasonSelect.value = String(selected.season);
+  elements.episodeSelect.value = String(selected.episode);
+  return {
+    changed: true,
+    selected
+  };
 }
 
 function getSelectedEpisode() {
@@ -195,7 +269,9 @@ function trimPreparedEntries() {
   }
   for (const [key, value] of state.prepared.entries()) {
     if (!keep.has(key)) {
-      URL.revokeObjectURL(value.blobUrl);
+      if (value && value.blobUrl) {
+        URL.revokeObjectURL(value.blobUrl);
+      }
       state.prepared.delete(key);
     }
   }
@@ -267,6 +343,31 @@ async function downloadSourceFile(url, onProgress) {
     throw new Error(`Source is too large (${Math.round(total / (1024 * 1024))}MB) for frontend processing`);
   }
   const reader = response.body.getReader();
+  if (total > 0) {
+    const merged = new Uint8Array(total);
+    let received = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (value) {
+        if (received + value.length > merged.length) {
+          throw new Error('Source stream exceeded declared content length');
+        }
+        merged.set(value, received);
+        received += value.length;
+        onProgress(Math.min(0.99, received / total));
+      }
+    }
+    if (received === 0) {
+      throw new Error('Source URL returned empty response body');
+    }
+    if (received === merged.length) {
+      return merged;
+    }
+    return merged.slice(0, received);
+  }
   const chunks = [];
   let received = 0;
   let chunkCount = 0;
@@ -398,11 +499,11 @@ function resolveSourceUrl(value) {
 function upsertPreparedEntry(season, episode, sourceUrl, outputBytes) {
   const key = buildEpisodeKey(season, episode);
   const oldEntry = state.prepared.get(key);
-  if (oldEntry) {
+  if (oldEntry && oldEntry.blobUrl) {
     URL.revokeObjectURL(oldEntry.blobUrl);
   }
   const blobUrl = URL.createObjectURL(new Blob([outputBytes], { type: 'video/mp4' }));
-  const entry = { key, season, episode, sourceUrl, blobUrl };
+  const entry = { key, season, episode, sourceUrl, playUrl: blobUrl, blobUrl };
   state.prepared.set(key, entry);
   trimPreparedEntries();
   return entry;
@@ -500,8 +601,8 @@ async function prepareEpisodeForeground(season, episode, requestId) {
 
 async function startPlayback(entry, isAutoStart) {
   const activeSrc = String(elements.video.currentSrc || elements.video.src || '');
-  if (activeSrc !== entry.blobUrl) {
-    elements.video.src = entry.blobUrl;
+  if (activeSrc !== entry.playUrl) {
+    elements.video.src = entry.playUrl;
     elements.video.load();
   }
   try {
@@ -604,29 +705,119 @@ async function onVideoEnded() {
   await playSelectedEpisode(true);
 }
 
+async function refreshCatalog(options = {}) {
+  const force = !!options.force;
+  const foreground = !!options.foreground;
+  const silentError = !!options.silentError;
+  const preserveSelection = options.preserveSelection !== false;
+  const preferredEpisode = preserveSelection ? { ...state.current } : null;
+  if (foreground) {
+    setBusy(true);
+    setStatus(force ? 'Refreshing episodes...' : 'Loading episodes...');
+  }
+  try {
+    const payload = await fetchShow({ force });
+    writeShowCache(payload);
+    const result = applyCatalogPayload(payload, {
+      preserveSelection,
+      preferredEpisode
+    });
+    if (foreground) {
+      if (force) {
+        setStatus('Episodes refreshed');
+      } else {
+        setStatus(`Selected ${formatEpisodeLabel(state.current.season, state.current.episode)}. Press Play.`);
+      }
+    } else if (result.changed) {
+      setStatus(`Episodes updated. Selected ${formatEpisodeLabel(state.current.season, state.current.episode)}.`);
+    }
+    return result;
+  } catch (error) {
+    if (!silentError) {
+      const message = error && error.message ? error.message : 'Cannot load show catalog';
+      setStatus(message, true);
+    }
+    throw error;
+  } finally {
+    if (foreground) {
+      setBusy(false);
+    }
+  }
+}
+
+function tryLoadCatalogFromCache() {
+  const payload = readShowCache();
+  if (!payload) {
+    return false;
+  }
+  try {
+    applyCatalogPayload(payload, {
+      preserveSelection: false
+    });
+    setStatus('Loaded from cache. Refreshing episodes...');
+    return true;
+  } catch {
+    clearShowCache();
+    return false;
+  }
+}
+
+async function onForceRefreshEpisodesClick() {
+  closeMenu();
+  if (state.isBusy) {
+    return;
+  }
+  try {
+    await refreshCatalog({
+      force: true,
+      foreground: true,
+      preserveSelection: true
+    });
+  } catch {
+  }
+}
+
+function onDocumentClick(event) {
+  if (!state.isMenuOpen) {
+    return;
+  }
+  const target = event.target;
+  if (!(target instanceof Node)) {
+    return;
+  }
+  if (elements.menuPanel.contains(target) || elements.menuButton.contains(target)) {
+    return;
+  }
+  closeMenu();
+}
+
+function onDocumentKeydown(event) {
+  if (event.key === 'Escape') {
+    closeMenu();
+  }
+}
+
 async function init() {
-  setBusy(true);
   setProgress(0);
   setProgressText('');
-  setStatus('Loading episodes...');
+  setBusy(true);
+  const loadedFromCache = tryLoadCatalogFromCache();
+  if (loadedFromCache) {
+    setBusy(false);
+  }
   try {
-    const payload = await fetchShow();
-    state.catalog = normalizeCatalog(payload);
-    elements.showTitle.textContent = `${state.catalog.title} English Player`;
-    const initial = findInitialEpisode();
-    if (!initial) {
-      throw new Error('No episodes available in catalog');
+    await refreshCatalog({
+      force: false,
+      foreground: !loadedFromCache,
+      silentError: loadedFromCache,
+      preserveSelection: loadedFromCache
+    });
+  } catch {
+    if (loadedFromCache && state.catalog) {
+      setStatus('Using cached episodes. Background refresh failed.', true);
     }
-    renderSeasonOptions(initial.season);
-    renderEpisodeOptions(initial.season, initial.episode);
-    setCurrentEpisode(initial.season, initial.episode, false);
-    elements.seasonSelect.value = String(initial.season);
-    elements.episodeSelect.value = String(initial.episode);
-    setStatus(`Selected ${formatEpisodeLabel(initial.season, initial.episode)}. Press Play.`);
-  } catch (error) {
-    const message = error && error.message ? error.message : 'Cannot load show catalog';
-    setStatus(message, true);
-  } finally {
+  }
+  if (!state.catalog) {
     setBusy(false);
   }
 }
@@ -639,5 +830,13 @@ elements.playButton.addEventListener('click', () => {
 elements.video.addEventListener('ended', () => {
   void onVideoEnded();
 });
+elements.menuButton.addEventListener('click', () => {
+  toggleMenu();
+});
+elements.refreshEpisodesButton.addEventListener('click', () => {
+  void onForceRefreshEpisodesClick();
+});
+document.addEventListener('click', onDocumentClick);
+document.addEventListener('keydown', onDocumentKeydown);
 
 void init();

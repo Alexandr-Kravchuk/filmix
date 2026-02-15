@@ -274,3 +274,31 @@ test('renders watch page for direct source url', async () => {
   assert.match(response.text, /<video/);
   assert.match(response.text, new RegExp(encodeURIComponent(src)));
 });
+
+test('forces /api/show catalog rebuild when force query is enabled', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'filmix-api-test-force-show-'));
+  const mapPath = path.join(tempDir, 'english-map.json');
+  await fs.writeFile(mapPath, `${JSON.stringify({}, null, 2)}\n`, 'utf8');
+  let calls = 0;
+  const app = createApp({
+    mapPath,
+    corsOrigin: 'http://localhost:5173',
+    showTitle: 'PAW Patrol',
+    fixedSeason: 5,
+    fixedEpisode: 11,
+    pageUrl: 'https://filmix.zip/multser/detskij/87660-v-schenyachiy-patrul-chas-2013.html',
+    userAgent: 'TestAgent',
+    version: 'test',
+    filmixClient: {
+      async getPlayerData() {
+        calls += 1;
+        return playerDataFixture;
+      }
+    }
+  });
+  await request(app).get('/api/show').expect(200);
+  await request(app).get('/api/show').expect(200);
+  assert.equal(calls, 1);
+  await request(app).get('/api/show').query({ force: 1 }).expect(200);
+  assert.equal(calls, 2);
+});

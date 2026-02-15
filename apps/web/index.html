@@ -9,7 +9,15 @@
   <body>
     <main class="app">
       <section class="header">
-        <h1 id="show-title">PAW Patrol English Player</h1>
+        <div class="header-row">
+          <h1 id="show-title">PAW Patrol English Player</h1>
+          <div class="menu-wrap">
+            <button id="menu-btn" class="menu-btn" type="button" aria-label="Open menu" aria-haspopup="menu" aria-expanded="false">⋯</button>
+            <div id="menu-panel" class="menu-panel" role="menu" hidden>
+              <button id="refresh-episodes-btn" class="menu-item" type="button" role="menuitem">Force refresh episodes</button>
+            </div>
+          </div>
+        </div>
         <p id="status" class="status"></p>
       </section>
       <section class="controls">

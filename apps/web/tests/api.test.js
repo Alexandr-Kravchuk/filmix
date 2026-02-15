@@ -12,3 +12,23 @@ test('exports show loader', () => {
 test('exports episode source loader', () => {
   assert.equal(typeof fetchSourceByEpisode, 'function');
 });
+
+test('sends force query when loading show with force option', async () => {
+  const originalFetch = globalThis.fetch;
+  let calledUrl = '';
+  globalThis.fetch = async (url) => {
+    calledUrl = String(url);
+    return {
+      ok: true,
+      async json() {
+        return {};
+      }
+    };
+  };
+  try {
+    await fetchShow({ force: true });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.match(calledUrl, /\/api\/show\?force=1$/);
+});

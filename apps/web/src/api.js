@@ -29,7 +29,10 @@ async function fetchJson(path, params) {
   return response.json();
 }
 
-export async function fetchShow() {
+export async function fetchShow(options = {}) {
+  if (options && options.force) {
+    return fetchJson('/api/show', { force: 1 });
+  }
   return fetchJson('/api/show');
 }
 export async function fetchSourceByEpisode(season, episode) {
