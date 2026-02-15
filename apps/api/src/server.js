@@ -49,6 +49,17 @@ function parseBoolean(value, defaultValue) {
   }
   return defaultValue;
 }
+function parsePreferredQuality(value) {
+  const normalized = String(value === undefined || value === null ? '' : value).trim().toLowerCase();
+  if (!normalized || normalized === 'max' || normalized === 'highest' || normalized === 'best') {
+    return Number.MAX_SAFE_INTEGER;
+  }
+  const parsed = Number.parseInt(normalized, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return Number.MAX_SAFE_INTEGER;
+  }
+  return parsed;
+}
 function escapeHtml(value) {
   return String(value)
     .replaceAll('&', '&amp;')
@@ -491,7 +502,7 @@ export function createRuntimeConfig() {
     fixedLocalFilePath: process.env.FIXED_LOCAL_FILE_PATH || '',
     fixedPublicMediaUrl: process.env.FIXED_PUBLIC_MEDIA_URL || '',
     fixedPublicMediaViaProxy: parseBoolean(process.env.FIXED_PUBLIC_MEDIA_VIA_PROXY, true),
-    fixedQuality: Number.parseInt(process.env.FIXED_QUALITY || '480', 10),
+    fixedQuality: parsePreferredQuality(process.env.FIXED_QUALITY || 'max'),
     preferredTranslationPattern: process.env.FILMIX_PREFERRED_TRANSLATION_PATTERN || 'ukr|укра',
     pageUrl,
     userAgent,

@@ -38,7 +38,7 @@ Required values:
 - `CORS_ORIGIN`
 - `FIXED_SEASON`
 - `FIXED_EPISODE`
-- `FIXED_QUALITY` (default `480`)
+- `FIXED_QUALITY` (default `max`)
 - `MEDIA_CACHE_DIR` (default `/tmp/filmix-cache`)
 - `FFMPEG_BIN` (default `ffmpeg`)
 - `FFPROBE_BIN` (default `ffprobe`)
@@ -181,7 +181,7 @@ The Vite `base` path is auto-set to `/<repo>/` in GitHub Actions.
   - `FILMIX_PREFERRED_TRANSLATION_PATTERN=ukr|укра`
   - `FIXED_SEASON=5`
   - `FIXED_EPISODE=11`
-  - `FIXED_QUALITY=480`
+  - `FIXED_QUALITY=max`
   - `CORS_ORIGIN=https://<github-user>.github.io`
 - Keep empty in production:
   - `FIXED_LOCAL_FILE_PATH=`
