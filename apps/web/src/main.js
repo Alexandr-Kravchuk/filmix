@@ -26,9 +26,72 @@ function parseBootstrapQuality(value) {
   }
   return parsed;
 }
+const PLAYBACK_MODE_KEY = 'filmix-playback-mode-v1';
+const PLAYBACK_MODE_STANDARD = 'standard';
+const PLAYBACK_MODE_MINIMAL = 'minimal';
+const MINIMAL_BOOTSTRAP_QUALITY = 1;
+function parsePlaybackMode(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === PLAYBACK_MODE_STANDARD) {
+    return PLAYBACK_MODE_STANDARD;
+  }
+  if (normalized === PLAYBACK_MODE_MINIMAL || normalized === 'min' || normalized === 'low') {
+    return PLAYBACK_MODE_MINIMAL;
+  }
+  return '';
+}
+function readStoredPlaybackMode() {
+  try {
+    if (!('localStorage' in globalThis)) {
+      return '';
+    }
+    return parsePlaybackMode(globalThis.localStorage.getItem(PLAYBACK_MODE_KEY));
+  } catch {
+    return '';
+  }
+}
+function writeStoredPlaybackMode(mode) {
+  try {
+    if (!('localStorage' in globalThis)) {
+      return;
+    }
+    globalThis.localStorage.setItem(PLAYBACK_MODE_KEY, mode);
+  } catch {
+  }
+}
+function readPlaybackModeFromQuery() {
+  try {
+    const mode = new URL(globalThis.location.href).searchParams.get('mode');
+    return parsePlaybackMode(mode);
+  } catch {
+    return '';
+  }
+}
+function isXboxDevice() {
+  if (typeof navigator === 'undefined') {
+    return false;
+  }
+  const userAgent = String(navigator.userAgent || '');
+  return userAgent.toLowerCase().includes('xbox');
+}
+function resolveInitialPlaybackMode() {
+  const queryMode = readPlaybackModeFromQuery();
+  if (queryMode) {
+    return queryMode;
+  }
+  const storedMode = readStoredPlaybackMode();
+  if (storedMode) {
+    return storedMode;
+  }
+  if (isXboxDevice()) {
+    return PLAYBACK_MODE_MINIMAL;
+  }
+  return PLAYBACK_MODE_STANDARD;
+}
 
 const bootstrapQuality = parseBootstrapQuality(import.meta.env.VITE_BOOTSTRAP_QUALITY);
 const enableHdUpgrade = parseBooleanEnv(import.meta.env.VITE_ENABLE_HD_UPGRADE, true);
+const initialPlaybackMode = resolveInitialPlaybackMode();
 const elements = {
   showTitle: document.getElementById('show-title'),
   status: document.getElementById('status'),
@@ -41,12 +104,14 @@ const elements = {
   video: document.getElementById('video'),
   menuButton: document.getElementById('menu-btn'),
   menuPanel: document.getElementById('menu-panel'),
+  modeToggleButton: document.getElementById('mode-toggle-btn'),
   refreshEpisodesButton: document.getElementById('refresh-episodes-btn')
 };
 const state = {
   isBusy: false,
   isMenuOpen: false,
-  qualityStage: 'idle'
+  qualityStage: 'idle',
+  playbackMode: initialPlaybackMode
 };
 
 function setStatus(message, isError = false) {
@@ -77,6 +142,58 @@ function formatClock(seconds) {
 function formatEpisodeLabel(season, episode) {
   return `Season ${season}, episode ${episode}`;
 }
+function getBootstrapQualityForMode() {
+  if (state.playbackMode === PLAYBACK_MODE_MINIMAL) {
+    return MINIMAL_BOOTSTRAP_QUALITY;
+  }
+  return bootstrapQuality;
+}
+function isHdUpgradeEnabledForMode() {
+  if (state.playbackMode === PLAYBACK_MODE_MINIMAL) {
+    return false;
+  }
+  return enableHdUpgrade;
+}
+function getModeHintText() {
+  if (state.playbackMode === PLAYBACK_MODE_MINIMAL) {
+    return 'Minimal mode: lowest quality only';
+  }
+  if (enableHdUpgrade) {
+    return `Two-stage mode: ${bootstrapQuality}p -> max`;
+  }
+  return 'Single-stage mode: max only';
+}
+function getRequestedQualityLabel(value) {
+  const parsed = Number.parseInt(String(value || ''), 10);
+  if (!Number.isFinite(parsed) || parsed <= 1) {
+    return 'lowest quality';
+  }
+  return `${parsed}p`;
+}
+function updateModeToggleLabel() {
+  elements.modeToggleButton.textContent = state.playbackMode === PLAYBACK_MODE_MINIMAL
+    ? 'Minimal quality mode: on'
+    : 'Minimal quality mode: off';
+}
+function applyPlaybackMode(mode, options = {}) {
+  const parsed = parsePlaybackMode(mode);
+  if (!parsed) {
+    return;
+  }
+  const persist = options.persist !== false;
+  const showStatus = options.showStatus === true;
+  state.playbackMode = parsed;
+  updateModeToggleLabel();
+  setBackgroundStatus(getModeHintText());
+  if (showStatus) {
+    setStatus(parsed === PLAYBACK_MODE_MINIMAL ? 'Minimal quality mode enabled' : 'Standard quality mode enabled');
+  }
+  setProgress(0);
+  setProgressText('');
+  if (persist) {
+    writeStoredPlaybackMode(parsed);
+  }
+}
 function closeMenu() {
   state.isMenuOpen = false;
   elements.menuPanel.hidden = true;
@@ -103,6 +220,7 @@ function setBusy(isBusy) {
   elements.episodeSelect.disabled = isBusy;
   elements.playButton.disabled = isBusy || !catalog.getCatalog();
   elements.menuButton.disabled = isBusy;
+  elements.modeToggleButton.disabled = isBusy;
   elements.refreshEpisodesButton.disabled = isBusy;
   if (isBusy) {
     closeMenu();
@@ -171,8 +289,9 @@ const playback = createPlaybackController({
   setQualityStage,
   formatEpisodeLabel,
   formatClock,
-  getBootstrapQuality: () => bootstrapQuality,
-  isHdUpgradeEnabled: () => enableHdUpgrade
+  getBootstrapQuality: () => getBootstrapQualityForMode(),
+  isHdUpgradeEnabled: () => isHdUpgradeEnabledForMode(),
+  formatRequestedQualityLabel: getRequestedQualityLabel
 });
 
 async function refreshEpisodes(force = false) {
@@ -206,7 +325,7 @@ function onDocumentKeydown(event) {
 async function init() {
   setProgress(0);
   setProgressText('');
-  setBackgroundStatus(enableHdUpgrade ? `Two-stage mode: ${bootstrapQuality}p -> max` : 'Single-stage mode: max only');
+  applyPlaybackMode(state.playbackMode, { persist: true, showStatus: false });
   setBusy(true);
   const loadedFromCache = catalog.tryLoadCatalogFromCache();
   if (loadedFromCache) {
@@ -254,6 +373,14 @@ elements.video.addEventListener('timeupdate', () => {
 });
 elements.menuButton.addEventListener('click', () => {
   toggleMenu();
+});
+elements.modeToggleButton.addEventListener('click', () => {
+  closeMenu();
+  if (state.isBusy) {
+    return;
+  }
+  const nextMode = state.playbackMode === PLAYBACK_MODE_MINIMAL ? PLAYBACK_MODE_STANDARD : PLAYBACK_MODE_MINIMAL;
+  applyPlaybackMode(nextMode, { persist: true, showStatus: true });
 });
 elements.refreshEpisodesButton.addEventListener('click', () => {
   closeMenu();

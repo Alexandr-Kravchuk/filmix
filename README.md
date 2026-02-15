@@ -89,6 +89,16 @@ The app downloads the source MP4, remuxes it to a single English audio track, an
 
 If source URL expires, export fresh `player-data` response (`text-*.txt` from Proxyman), load it with `Extract URL from player-data`, then run `Prepare English` again.
 
+For weak devices you can enable minimal quality mode in menu (`⋯`):
+
+- `Minimal quality mode: on` starts from lowest available quality and disables HD upgrade.
+- `Minimal quality mode: off` uses standard flow (`480 -> max`).
+
+You can force mode from URL:
+
+- `?mode=minimal`
+- `?mode=standard`
+
 ## API endpoints
 
 - `GET /api/health`

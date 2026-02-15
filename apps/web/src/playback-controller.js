@@ -83,8 +83,11 @@ export function createPlaybackController(options) {
   }
   async function prepareEpisodeForeground(season, episode, quality, requestId) {
     const task = options.taskQueue.prepareEpisodeAtQuality(season, episode, quality);
+    const requestedLabel = typeof options.formatRequestedQualityLabel === 'function'
+      ? options.formatRequestedQualityLabel(quality)
+      : task.qualityLabel;
     setQualityStage('preparing_480');
-    options.setStatus(`Preparing English ${task.qualityLabel}...`);
+    options.setStatus(`Preparing English ${requestedLabel}...`);
     options.setBackgroundStatus('');
     options.setBusy(true);
     renderForegroundProgress(task);
