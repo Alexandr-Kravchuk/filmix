@@ -102,14 +102,11 @@ const elements = {
   progress: document.getElementById('progress'),
   progressText: document.getElementById('progress-text'),
   video: document.getElementById('video'),
-  menuButton: document.getElementById('menu-btn'),
-  menuPanel: document.getElementById('menu-panel'),
   modeToggleButton: document.getElementById('mode-toggle-btn'),
   refreshEpisodesButton: document.getElementById('refresh-episodes-btn')
 };
 const state = {
   isBusy: false,
-  isMenuOpen: false,
   qualityStage: 'idle',
   playbackMode: initialPlaybackMode
 };
@@ -194,37 +191,13 @@ function applyPlaybackMode(mode, options = {}) {
     writeStoredPlaybackMode(parsed);
   }
 }
-function closeMenu() {
-  state.isMenuOpen = false;
-  elements.menuPanel.hidden = true;
-  elements.menuButton.setAttribute('aria-expanded', 'false');
-}
-function openMenu() {
-  if (elements.menuButton.disabled) {
-    return;
-  }
-  state.isMenuOpen = true;
-  elements.menuPanel.hidden = false;
-  elements.menuButton.setAttribute('aria-expanded', 'true');
-}
-function toggleMenu() {
-  if (state.isMenuOpen) {
-    closeMenu();
-    return;
-  }
-  openMenu();
-}
 function setBusy(isBusy) {
   state.isBusy = isBusy;
   elements.seasonSelect.disabled = isBusy;
   elements.episodeSelect.disabled = isBusy;
   elements.playButton.disabled = isBusy || !catalog.getCatalog();
-  elements.menuButton.disabled = isBusy;
   elements.modeToggleButton.disabled = isBusy;
   elements.refreshEpisodesButton.disabled = isBusy;
-  if (isBusy) {
-    closeMenu();
-  }
   if (!isBusy) {
     elements.playButton.textContent = 'Play';
   }
@@ -303,25 +276,6 @@ async function refreshEpisodes(force = false) {
   playback.syncWindow();
   scheduleFfmpegWarmup();
 }
-
-function onDocumentClick(event) {
-  if (!state.isMenuOpen) {
-    return;
-  }
-  const target = event.target;
-  if (!(target instanceof Node)) {
-    return;
-  }
-  if (elements.menuPanel.contains(target) || elements.menuButton.contains(target)) {
-    return;
-  }
-  closeMenu();
-}
-function onDocumentKeydown(event) {
-  if (event.key === 'Escape') {
-    closeMenu();
-  }
-}
 async function init() {
   setProgress(0);
   setProgressText('');
@@ -371,11 +325,7 @@ elements.video.addEventListener('pause', () => {
 elements.video.addEventListener('timeupdate', () => {
   progressSync.onTimeUpdate();
 });
-elements.menuButton.addEventListener('click', () => {
-  toggleMenu();
-});
 elements.modeToggleButton.addEventListener('click', () => {
-  closeMenu();
   if (state.isBusy) {
     return;
   }
@@ -383,15 +333,12 @@ elements.modeToggleButton.addEventListener('click', () => {
   applyPlaybackMode(nextMode, { persist: true, showStatus: true });
 });
 elements.refreshEpisodesButton.addEventListener('click', () => {
-  closeMenu();
   if (state.isBusy) {
     return;
   }
   void refreshEpisodes(true).catch(() => {
   });
 });
-document.addEventListener('click', onDocumentClick);
-document.addEventListener('keydown', onDocumentKeydown);
 globalThis.addEventListener('beforeunload', () => {
   progressSync.onClose();
 });
