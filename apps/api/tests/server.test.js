@@ -79,6 +79,9 @@ test('serves show, episode, play and har import', async () => {
   });
   const showResponse = await request(app).get('/api/show').expect(200);
   assert.equal(showResponse.body.title, 'PAW Patrol');
+  assert.deepEqual(showResponse.body.seasons, [1]);
+  assert.deepEqual(showResponse.body.episodesBySeason, { '1': [1, 2] });
+  assert.deepEqual(showResponse.body.fixed, { season: 1, episode: 1 });
   const episodeResponse = await request(app).get('/api/episode').query({ season: 1, episode: 1 }).expect(200);
   assert.equal(episodeResponse.body.defaultLang, 'en');
   assert.deepEqual(
@@ -95,6 +98,13 @@ test('serves show, episode, play and har import', async () => {
   const sourceResponse = await request(app).get('/api/source').expect(200);
   assert.equal(sourceResponse.body.sourceUrl, 'https://cdn.example/en/s01e01.m3u8');
   assert.equal(sourceResponse.body.origin, 'catalog');
+  const sourceByEpisodeResponse = await request(app).get('/api/source').query({ season: 1, episode: 2 }).expect(200);
+  assert.equal(sourceByEpisodeResponse.body.season, 1);
+  assert.equal(sourceByEpisodeResponse.body.episode, 2);
+  assert.equal(sourceByEpisodeResponse.body.sourceUrl, 'https://cdn.example/ru/s01e02_720.mp4');
+  assert.equal(sourceByEpisodeResponse.body.origin, 'catalog');
+  await request(app).get('/api/source').query({ season: 1, episode: 'x' }).expect(400);
+  await request(app).get('/api/source').query({ season: 1, episode: 9 }).expect(404);
   const fixedPlayResponse = await request(app).get('/api/play').expect(302);
   assert.match(fixedPlayResponse.headers.location, /^\/proxy\/video\?src=/);
   await request(app)

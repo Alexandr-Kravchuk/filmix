@@ -136,6 +136,49 @@ export function createApp(config) {
       origin: 'catalog'
     };
   }
+  function pickCatalogSource(data) {
+    const priority = ['uk', 'ru', 'en'];
+    for (const lang of priority) {
+      const source = data.sources.find((item) => item.lang === lang);
+      if (source) {
+        return source;
+      }
+    }
+    return null;
+  }
+  async function resolveSourceDataForEpisode(season, episode) {
+    if (season === fixedSeason && episode === fixedEpisode) {
+      return resolveFixedSourceData();
+    }
+    const playerData = await config.filmixClient.getPlayerData();
+    try {
+      const resolved = await resolveEpisodeSourceFromPlayerData(playerData, {
+        season,
+        episode,
+        preferredQuality: fixedQuality,
+        preferredTranslationPattern,
+        userAgent: config.userAgent,
+        fetchImpl: playlistFetch
+      });
+      return {
+        sourceUrl: resolved.sourceUrl,
+        origin: 'player-data'
+      };
+    } catch {
+    }
+    const catalog = await buildCatalogSnapshot();
+    const data = getEpisodeData(catalog, season, episode);
+    const source = pickCatalogSource(data);
+    if (!source) {
+      const error = new Error('Episode not found or no sources available');
+      error.statusCode = 404;
+      throw error;
+    }
+    return {
+      sourceUrl: source.sourceUrl,
+      origin: 'catalog'
+    };
+  }
 
   async function sendLocalVideo(filePath, req, res) {
     const fileStat = await stat(filePath);
@@ -222,7 +265,13 @@ export function createApp(config) {
     try {
       const catalog = await buildCatalogSnapshot();
       res.json({
-        title: catalog.title
+        title: catalog.title,
+        seasons: catalog.seasons,
+        episodesBySeason: catalog.episodesBySeason,
+        fixed: {
+          season: fixedSeason,
+          episode: fixedEpisode
+        }
       });
     } catch (error) {
       next(error);
@@ -257,10 +306,28 @@ export function createApp(config) {
   });
   app.get('/api/source', async (req, res, next) => {
     try {
-      const sourceData = await resolveFixedSourceData();
+      const hasSeason = Object.hasOwn(req.query, 'season');
+      const hasEpisode = Object.hasOwn(req.query, 'episode');
+      if (!hasSeason && !hasEpisode) {
+        const sourceData = await resolveFixedSourceData();
+        res.json({
+          season: fixedSeason,
+          episode: fixedEpisode,
+          sourceUrl: sourceData.sourceUrl,
+          origin: sourceData.origin
+        });
+        return;
+      }
+      const season = Number.parseInt(String(req.query.season || ''), 10);
+      const episode = Number.parseInt(String(req.query.episode || ''), 10);
+      if (!Number.isFinite(season) || !Number.isFinite(episode)) {
+        res.status(400).json({ error: 'season and episode are required integers' });
+        return;
+      }
+      const sourceData = await resolveSourceDataForEpisode(season, episode);
       res.json({
-        season: fixedSeason,
-        episode: fixedEpisode,
+        season,
+        episode,
         sourceUrl: sourceData.sourceUrl,
         origin: sourceData.origin
       });
@@ -400,7 +467,9 @@ video{width:min(100%,1200px);max-height:90vh;background:#000}
 
   app.use((error, req, res, next) => {
     const message = error && error.message ? error.message : 'Internal Server Error';
-    res.status(500).json({ error: message });
+    const statusCode = Number.parseInt(String(error && error.statusCode ? error.statusCode : ''), 10);
+    const status = Number.isFinite(statusCode) && statusCode >= 400 && statusCode < 600 ? statusCode : 500;
+    res.status(status).json({ error: message });
   });
 
   return app;

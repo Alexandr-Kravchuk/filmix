@@ -4,7 +4,7 @@ This repository contains a static frontend for GitHub Pages and a separate Node.
 
 ## Architecture
 
-- `apps/web`: Vite + Vanilla JS frontend for one fixed episode with English playback only.
+- `apps/web`: Vite + Vanilla JS frontend with season/episode picker and English playback only.
 - `apps/api`: Express API with Filmix auth, catalog extraction, video proxy, and HAR import.
 - `apps/api/data/english-map.json`: English source mapping by `season:episode` keys.
 
@@ -78,8 +78,8 @@ You can run web app without API and prepare English track fully in browser via `
 npm --workspace apps/web run dev
 ```
 
-Open Vite URL and click `Prepare English`.
-The app downloads the full source MP4, remuxes it to a single English audio track, and plays resulting `blob:` video.
+Open Vite URL, choose season and episode, then click `Play`.
+The app downloads the source MP4, remuxes it to a single English audio track, and starts playback from resulting `blob:` video.
 
 If source URL expires, export fresh `player-data` response (`text-*.txt` from Proxyman), load it with `Extract URL from player-data`, then run `Prepare English` again.
 
@@ -89,6 +89,7 @@ If source URL expires, export fresh `player-data` response (`text-*.txt` from Pr
 - `GET /api/show`
 - `GET /api/fixed-episode`
 - `GET /api/source`
+- `GET /api/source?season=5&episode=11`
 - `GET /api/episode?season=1&episode=1`
 - `GET /api/play`
 - `GET /api/play?season=1&episode=1&lang=en`
@@ -97,7 +98,10 @@ If source URL expires, export fresh `player-data` response (`text-*.txt` from Pr
 - `GET /watch?src=<encoded_url>`
 - `POST /api/admin/import-har` with `Authorization: Bearer <ADMIN_TOKEN>`
 
-`/api/source` is a lightweight endpoint for GitHub Pages mode: it only returns a fresh direct Filmix MP4 URL and does not proxy video bytes.
+`/api/source` is a lightweight endpoint for GitHub Pages mode:
+
+- without query params returns fixed episode source
+- with `season` and `episode` returns source for selected episode
 
 `/proxy/video-en` downloads source to local cache, remuxes to a single English audio track, then serves cached MP4 with `Range`.
 
