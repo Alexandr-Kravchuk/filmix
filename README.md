@@ -89,10 +89,11 @@ The app downloads the source MP4, remuxes it to a single English audio track, an
 
 If source URL expires, export fresh `player-data` response (`text-*.txt` from Proxyman), load it with `Extract URL from player-data`, then run `Prepare English` again.
 
-For weak devices you can enable minimal quality mode in menu (`⋯`):
+For weak devices you can enable minimal quality mode with the header button `Minimal quality mode`.
 
 - `Minimal quality mode: on` starts from lowest available quality and disables HD upgrade.
 - `Minimal quality mode: off` uses standard flow (`480 -> max`).
+- On Xbox Edge, safe mode is forced automatically: lowest quality only, no warmup, no prefetch, no HD upgrade.
 
 You can force mode from URL:
 

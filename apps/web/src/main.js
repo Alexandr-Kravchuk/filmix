@@ -75,6 +75,9 @@ function isXboxDevice() {
   return userAgent.toLowerCase().includes('xbox');
 }
 function resolveInitialPlaybackMode() {
+  if (xboxSafeMode) {
+    return PLAYBACK_MODE_MINIMAL;
+  }
   const queryMode = readPlaybackModeFromQuery();
   if (queryMode) {
     return queryMode;
@@ -91,6 +94,7 @@ function resolveInitialPlaybackMode() {
 
 const bootstrapQuality = parseBootstrapQuality(import.meta.env.VITE_BOOTSTRAP_QUALITY);
 const enableHdUpgrade = parseBooleanEnv(import.meta.env.VITE_ENABLE_HD_UPGRADE, true);
+const xboxSafeMode = isXboxDevice();
 const initialPlaybackMode = resolveInitialPlaybackMode();
 const elements = {
   showTitle: document.getElementById('show-title'),
@@ -140,18 +144,33 @@ function formatEpisodeLabel(season, episode) {
   return `Season ${season}, episode ${episode}`;
 }
 function getBootstrapQualityForMode() {
+  if (xboxSafeMode) {
+    return MINIMAL_BOOTSTRAP_QUALITY;
+  }
   if (state.playbackMode === PLAYBACK_MODE_MINIMAL) {
     return MINIMAL_BOOTSTRAP_QUALITY;
   }
   return bootstrapQuality;
 }
 function isHdUpgradeEnabledForMode() {
+  if (xboxSafeMode) {
+    return false;
+  }
   if (state.playbackMode === PLAYBACK_MODE_MINIMAL) {
     return false;
   }
   return enableHdUpgrade;
 }
+function canRunBackgroundTasks() {
+  if (xboxSafeMode) {
+    return false;
+  }
+  return state.playbackMode === PLAYBACK_MODE_STANDARD;
+}
 function getModeHintText() {
+  if (xboxSafeMode) {
+    return 'Xbox safe mode: lowest quality, no background tasks';
+  }
   if (state.playbackMode === PLAYBACK_MODE_MINIMAL) {
     return 'Minimal mode: lowest quality only';
   }
@@ -168,12 +187,16 @@ function getRequestedQualityLabel(value) {
   return `${parsed}p`;
 }
 function updateModeToggleLabel() {
+  if (xboxSafeMode) {
+    elements.modeToggleButton.textContent = 'Minimal quality mode: locked (Xbox)';
+    return;
+  }
   elements.modeToggleButton.textContent = state.playbackMode === PLAYBACK_MODE_MINIMAL
     ? 'Minimal quality mode: on'
     : 'Minimal quality mode: off';
 }
 function applyPlaybackMode(mode, options = {}) {
-  const parsed = parsePlaybackMode(mode);
+  const parsed = xboxSafeMode ? PLAYBACK_MODE_MINIMAL : parsePlaybackMode(mode);
   if (!parsed) {
     return;
   }
@@ -196,7 +219,7 @@ function setBusy(isBusy) {
   elements.seasonSelect.disabled = isBusy;
   elements.episodeSelect.disabled = isBusy;
   elements.playButton.disabled = isBusy || !catalog.getCatalog();
-  elements.modeToggleButton.disabled = isBusy;
+  elements.modeToggleButton.disabled = isBusy || xboxSafeMode;
   elements.refreshEpisodesButton.disabled = isBusy;
   if (!isBusy) {
     elements.playButton.textContent = 'Play';
@@ -206,6 +229,9 @@ function setQualityStage(stage) {
   state.qualityStage = stage;
 }
 function scheduleFfmpegWarmup() {
+  if (xboxSafeMode) {
+    return;
+  }
   const run = () => {
     taskQueue.warmup();
   };
@@ -220,7 +246,8 @@ const taskQueue = createTaskQueue({
   fetchSourceByEpisode,
   fetchSourceBatch,
   getApiBaseUrl,
-  bootstrapQuality
+  bootstrapQuality,
+  enableOutputCache: !xboxSafeMode
 });
 const catalog = createCatalogController({
   elements,
@@ -264,7 +291,9 @@ const playback = createPlaybackController({
   formatClock,
   getBootstrapQuality: () => getBootstrapQualityForMode(),
   isHdUpgradeEnabled: () => isHdUpgradeEnabledForMode(),
-  formatRequestedQualityLabel: getRequestedQualityLabel
+  formatRequestedQualityLabel: getRequestedQualityLabel,
+  canPrefetchNext: () => canRunBackgroundTasks(),
+  isBatchPrimeEnabled: () => canRunBackgroundTasks()
 });
 
 async function refreshEpisodes(force = false) {
@@ -326,7 +355,7 @@ elements.video.addEventListener('timeupdate', () => {
   progressSync.onTimeUpdate();
 });
 elements.modeToggleButton.addEventListener('click', () => {
-  if (state.isBusy) {
+  if (state.isBusy || xboxSafeMode) {
     return;
   }
   const nextMode = state.playbackMode === PLAYBACK_MODE_MINIMAL ? PLAYBACK_MODE_STANDARD : PLAYBACK_MODE_MINIMAL;

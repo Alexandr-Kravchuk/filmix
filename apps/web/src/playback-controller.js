@@ -56,6 +56,18 @@ export function createPlaybackController(options) {
   const state = {
     playRequestId: 0
   };
+  function canPrefetchNext() {
+    if (typeof options.canPrefetchNext === 'function') {
+      return options.canPrefetchNext();
+    }
+    return true;
+  }
+  function isBatchPrimeEnabled() {
+    if (typeof options.isBatchPrimeEnabled === 'function') {
+      return options.isBatchPrimeEnabled();
+    }
+    return true;
+  }
   function setQualityStage(stage) {
     if (typeof options.setQualityStage === 'function') {
       options.setQualityStage(stage);
@@ -63,7 +75,7 @@ export function createPlaybackController(options) {
   }
   function setCurrentWindowTrim() {
     const current = options.catalog.getCurrentEpisode();
-    const next = options.catalog.getNextEpisode(current.season, current.episode);
+    const next = canPrefetchNext() ? options.catalog.getNextEpisode(current.season, current.episode) : null;
     options.taskQueue.trimPreparedEntries(current, next);
   }
   function renderForegroundProgress(task) {
@@ -185,6 +197,9 @@ export function createPlaybackController(options) {
     options.setBackgroundStatus('HD ready');
   }
   function maybePreloadNext(entry) {
+    if (!canPrefetchNext()) {
+      return;
+    }
     const next = options.catalog.getNextEpisode(entry.season, entry.episode);
     if (!next) {
       return;
@@ -248,10 +263,12 @@ export function createPlaybackController(options) {
         return;
       }
       const started = await startPlayback(entry, isAutoStart);
-      const windowEpisodes = collectBatchEpisodes(entry.season, entry.episode, 3);
-      void options.taskQueue.primeSourcesFromBatch(entry.season, windowEpisodes, bootstrapQuality);
-      if (options.isHdUpgradeEnabled()) {
-        void options.taskQueue.primeSourcesFromBatch(entry.season, windowEpisodes, 'max');
+      if (isBatchPrimeEnabled()) {
+        const windowEpisodes = collectBatchEpisodes(entry.season, entry.episode, 3);
+        void options.taskQueue.primeSourcesFromBatch(entry.season, windowEpisodes, bootstrapQuality);
+        if (options.isHdUpgradeEnabled()) {
+          void options.taskQueue.primeSourcesFromBatch(entry.season, windowEpisodes, 'max');
+        }
       }
       maybePreloadNext(entry);
       setCurrentWindowTrim();

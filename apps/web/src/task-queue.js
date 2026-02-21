@@ -86,6 +86,7 @@ export function createTaskQueue(options) {
   const prepared = new Map();
   const tasks = new Map();
   const bootstrapQuality = normalizeQualityRequest(options.bootstrapQuality || 480);
+  const enableOutputCache = options.enableOutputCache !== false;
   function getCacheKey(season, episode, sourceUrl) {
     return `https://filmix-cache.local/en-track/${encodeURIComponent(buildOutputCacheId(season, episode, sourceUrl))}`;
   }
@@ -100,7 +101,7 @@ export function createTaskQueue(options) {
     return new URL(sourceUrl, options.getApiBaseUrl()).toString();
   }
   async function loadCachedOutput(season, episode, sourceUrl) {
-    if (!('caches' in globalThis)) {
+    if (!enableOutputCache || !('caches' in globalThis)) {
       return null;
     }
     const cache = await caches.open(OUTPUT_CACHE_NAME);
@@ -115,7 +116,7 @@ export function createTaskQueue(options) {
     return blob;
   }
   async function saveCachedOutput(season, episode, sourceUrl, blob) {
-    if (!('caches' in globalThis)) {
+    if (!enableOutputCache || !('caches' in globalThis)) {
       return;
     }
     const cache = await caches.open(OUTPUT_CACHE_NAME);
