@@ -87,6 +87,7 @@ export function createTaskQueue(options) {
   const tasks = new Map();
   const bootstrapQuality = normalizeQualityRequest(options.bootstrapQuality || 480);
   const enableOutputCache = options.enableOutputCache !== false;
+  const releaseFfmpegAfterTask = options.releaseFfmpegAfterTask === true;
   function getCacheKey(season, episode, sourceUrl) {
     return `https://filmix-cache.local/en-track/${encodeURIComponent(buildOutputCacheId(season, episode, sourceUrl))}`;
   }
@@ -197,7 +198,11 @@ export function createTaskQueue(options) {
   }
   async function buildOutputBlob(sourceUrl, setTaskProgress) {
     const sourceBytes = await downloadSourceFile(sourceUrl, (downloadProgress) => setTaskProgress(0.05 + downloadProgress * 0.5));
-    const outputBytes = await remuxEnglishTrack(sourceBytes, (ffmpegProgress) => setTaskProgress(0.6 + ffmpegProgress * 0.38));
+    const outputBytes = await remuxEnglishTrack(
+      sourceBytes,
+      (ffmpegProgress) => setTaskProgress(0.6 + ffmpegProgress * 0.38),
+      { releaseAfter: releaseFfmpegAfterTask }
+    );
     return new Blob([outputBytes], { type: 'video/mp4' });
   }
   function upsertPreparedEntry(season, episode, qualityRequest, sourceUrl, quality, outputBlob) {

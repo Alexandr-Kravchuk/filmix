@@ -83,6 +83,21 @@ async function cleanupFiles(ffmpeg) {
     }
   }
 }
+function resetFfmpegState(ffmpeg) {
+  if (state.ffmpeg !== ffmpeg) {
+    return;
+  }
+  state.ffmpeg = null;
+  state.loaded = false;
+  state.lastError = '';
+  state.logTail = [];
+  if (ffmpeg && typeof ffmpeg.terminate === 'function') {
+    try {
+      ffmpeg.terminate();
+    } catch {
+    }
+  }
+}
 
 export function warmupFfmpeg() {
   return enqueue(async () => {
@@ -90,7 +105,8 @@ export function warmupFfmpeg() {
     return true;
   });
 }
-export function remuxEnglishTrack(sourceBytes, onProgress) {
+export function remuxEnglishTrack(sourceBytes, onProgress, options = {}) {
+  const releaseAfter = options && options.releaseAfter === true;
   return enqueue(async () => {
     const ffmpeg = await ensureLoaded(onProgress);
     state.lastError = '';
@@ -119,6 +135,9 @@ export function remuxEnglishTrack(sourceBytes, onProgress) {
     } finally {
       state.activeProgress = null;
       await cleanupFiles(ffmpeg);
+      if (releaseAfter) {
+        resetFfmpegState(ffmpeg);
+      }
     }
   });
 }

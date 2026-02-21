@@ -94,11 +94,13 @@ For weak devices you can enable minimal quality mode with the header button `Min
 - `Minimal quality mode: on` starts from lowest available quality and disables HD upgrade.
 - `Minimal quality mode: off` uses standard flow (`480 -> max`).
 - On Xbox Edge, safe mode is forced automatically: lowest quality only, no warmup, no prefetch, no HD upgrade.
+- In Xbox safe mode, ffmpeg instance is released after each prepared episode to reduce memory pressure.
 
 You can force mode from URL:
 
 - `?mode=minimal`
 - `?mode=standard`
+- `?xbox=1` or `?safe_xbox=1`
 
 ## API endpoints
 

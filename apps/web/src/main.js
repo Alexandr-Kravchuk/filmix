@@ -67,6 +67,21 @@ function readPlaybackModeFromQuery() {
     return '';
   }
 }
+function readBooleanQuery(name) {
+  try {
+    const value = new URL(globalThis.location.href).searchParams.get(name);
+    if (value === null) {
+      return false;
+    }
+    const normalized = String(value).trim().toLowerCase();
+    if (!normalized) {
+      return true;
+    }
+    return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+  } catch {
+    return false;
+  }
+}
 function isXboxDevice() {
   if (typeof navigator === 'undefined') {
     return false;
@@ -86,15 +101,13 @@ function resolveInitialPlaybackMode() {
   if (storedMode) {
     return storedMode;
   }
-  if (isXboxDevice()) {
-    return PLAYBACK_MODE_MINIMAL;
-  }
   return PLAYBACK_MODE_STANDARD;
 }
 
 const bootstrapQuality = parseBootstrapQuality(import.meta.env.VITE_BOOTSTRAP_QUALITY);
 const enableHdUpgrade = parseBooleanEnv(import.meta.env.VITE_ENABLE_HD_UPGRADE, true);
-const xboxSafeMode = isXboxDevice();
+const forceXboxSafeMode = readBooleanQuery('xbox') || readBooleanQuery('safe_xbox');
+const xboxSafeMode = forceXboxSafeMode || isXboxDevice();
 const initialPlaybackMode = resolveInitialPlaybackMode();
 const elements = {
   showTitle: document.getElementById('show-title'),
@@ -247,7 +260,8 @@ const taskQueue = createTaskQueue({
   fetchSourceBatch,
   getApiBaseUrl,
   bootstrapQuality,
-  enableOutputCache: !xboxSafeMode
+  enableOutputCache: !xboxSafeMode,
+  releaseFfmpegAfterTask: xboxSafeMode
 });
 const catalog = createCatalogController({
   elements,
