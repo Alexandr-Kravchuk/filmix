@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { decodePlayerjsValue, findEpisodeVariants, pickVariant, resolveEpisodeSourceFromPlayerData } from '../src/playerjs-service.js';
+import { decodePlayerjsValue, findEpisodeVariants, pickTranslation, pickVariant, resolveEpisodeSourceFromPlayerData } from '../src/playerjs-service.js';
 
 const decodeConfig = Object.freeze({
   file3Separator: ':<:',
@@ -57,7 +57,7 @@ test('resolves episode source from translations video and playlist', async () =>
     message: {
       translations: {
         video: {
-          'Дубляж [Ukr, MEGOGO Voice]': encodePlayerjsValue(playlistUrl)
+          'Original [English]': encodePlayerjsValue(playlistUrl)
         }
       }
     }
@@ -79,7 +79,7 @@ test('resolves episode source from translations video and playlist', async () =>
   });
   assert.equal(response.sourceUrl, 'https://cdn.example/paw/s05e11_480.mp4');
   assert.equal(response.playlistUrl, playlistUrl);
-  assert.equal(response.translationName, 'Дубляж [Ukr, MEGOGO Voice]');
+  assert.equal(response.translationName, 'Original [English]');
 });
 
 test('falls back to nearest lower or minimum quality when preferred quality is missing', async () => {
@@ -99,7 +99,7 @@ test('falls back to nearest lower or minimum quality when preferred quality is m
     message: {
       translations: {
         video: {
-          'Дубляж [Ukr, MEGOGO Voice]': encodePlayerjsValue(playlistUrl)
+          'Original [English]': encodePlayerjsValue(playlistUrl)
         }
       }
     }
@@ -168,7 +168,7 @@ test('throws when episode is missing in decoded playlist', async () => {
     message: {
       translations: {
         video: {
-          'Дубляж [Ukr, MEGOGO Voice]': encodePlayerjsValue(playlistUrl)
+          'Original [English]': encodePlayerjsValue(playlistUrl)
         }
       }
     }
@@ -189,4 +189,18 @@ test('throws when episode is missing in decoded playlist', async () => {
       }),
     /episode source was not found/
   );
+});
+
+
+test('prefers english translation and ignores ukrainian fallback', () => {
+  const preferred = pickTranslation({
+    'Дубляж [Ukr, MEGOGO Voice]': '#2abc',
+    'Original [English]': '#2def'
+  });
+  assert.equal(preferred[0], 'Original [English]');
+  const missingEnglish = pickTranslation({
+    'Дубляж [Ukr, MEGOGO Voice]': '#2abc',
+    'Дубляж [ru, SDI Media]': '#2def'
+  });
+  assert.equal(missingEnglish, null);
 });

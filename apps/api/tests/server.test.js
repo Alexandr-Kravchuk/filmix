@@ -60,7 +60,7 @@ const playerDataFixture = {
 test('serves show, episode, play and har import', async () => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'filmix-api-test-'));
   const mapPath = path.join(tempDir, 'english-map.json');
-  await fs.writeFile(mapPath, `${JSON.stringify({ '1:1': 'https://cdn.example/en/s01e01.m3u8' }, null, 2)}\n`, 'utf8');
+  await fs.writeFile(mapPath, `${JSON.stringify({ '1:1': 'https://cdn.example/en/s01e01.m3u8', '1:2': 'https://cdn.example/en/s01e02_720.m3u8' }, null, 2)}\n`, 'utf8');
   const app = createApp({
     mapPath,
     adminToken: 'secret-token',
@@ -102,24 +102,24 @@ test('serves show, episode, play and har import', async () => {
   const sourceByEpisodeResponse = await request(app).get('/api/source').query({ season: 1, episode: 2 }).expect(200);
   assert.equal(sourceByEpisodeResponse.body.season, 1);
   assert.equal(sourceByEpisodeResponse.body.episode, 2);
-  assert.equal(sourceByEpisodeResponse.body.sourceUrl, 'https://cdn.example/ru/s01e02_720.mp4');
+  assert.equal(sourceByEpisodeResponse.body.sourceUrl, 'https://cdn.example/en/s01e02_720.m3u8');
   assert.equal(sourceByEpisodeResponse.body.origin, 'catalog');
-  assert.equal(sourceByEpisodeResponse.body.quality, 720);
+  assert.equal(sourceByEpisodeResponse.body.quality, 0);
   assert.match(String(sourceByEpisodeResponse.headers['cache-control'] || ''), /max-age=30/);
   const sourceByQualityResponse = await request(app).get('/api/source').query({ season: 1, episode: 2, quality: 360 }).expect(200);
-  assert.equal(sourceByQualityResponse.body.sourceUrl, 'https://cdn.example/ru/s01e02_720.mp4');
-  assert.equal(sourceByQualityResponse.body.quality, 720);
+  assert.equal(sourceByQualityResponse.body.sourceUrl, 'https://cdn.example/en/s01e02_720.m3u8');
+  assert.equal(sourceByQualityResponse.body.quality, 0);
   const sourceByMinQualityResponse = await request(app).get('/api/source').query({ season: 1, episode: 2, quality: 'min' }).expect(200);
-  assert.equal(sourceByMinQualityResponse.body.sourceUrl, 'https://cdn.example/ru/s01e02_720.mp4');
-  assert.equal(sourceByMinQualityResponse.body.quality, 720);
+  assert.equal(sourceByMinQualityResponse.body.sourceUrl, 'https://cdn.example/en/s01e02_720.m3u8');
+  assert.equal(sourceByMinQualityResponse.body.quality, 0);
   const sourceLadderResponse = await request(app).get('/api/source-ladder').query({ season: 1, episode: 2 }).expect(200);
   assert.equal(sourceLadderResponse.body.season, 1);
   assert.equal(sourceLadderResponse.body.episode, 2);
   assert.equal(sourceLadderResponse.body.bootstrapQuality, 480);
-  assert.equal(sourceLadderResponse.body.maxQuality, 720);
+  assert.equal(sourceLadderResponse.body.maxQuality, 0);
   assert.deepEqual(
     sourceLadderResponse.body.sources.map((item) => item.quality),
-    [720]
+    [0]
   );
   await request(app).get('/api/source').query({ season: 1, episode: 'x' }).expect(400);
   await request(app).get('/api/source').query({ season: 1, episode: 2, quality: 'bad' }).expect(400);
