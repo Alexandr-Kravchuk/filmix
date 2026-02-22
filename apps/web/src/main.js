@@ -1,5 +1,5 @@
 import './styles.css';
-import { fetchShow, fetchSourceByEpisode, fetchSourceBatch, fetchPlaybackProgress, savePlaybackProgress, sendPlaybackProgressBeacon, getApiBaseUrl } from './api.js';
+import { fetchShow, fetchSourceByEpisode, fetchSourceBatch, fetchSourceLadder, fetchPlaybackProgress, savePlaybackProgress, sendPlaybackProgressBeacon, getApiBaseUrl } from './api.js';
 import { readShowCache, writeShowCache, clearShowCache } from './show-cache.js';
 import { createCatalogController } from './catalog-controller.js';
 import { createTaskQueue } from './task-queue.js';
@@ -120,13 +120,66 @@ const elements = {
   progressText: document.getElementById('progress-text'),
   video: document.getElementById('video'),
   modeToggleButton: document.getElementById('mode-toggle-btn'),
-  refreshEpisodesButton: document.getElementById('refresh-episodes-btn')
+  refreshEpisodesButton: document.getElementById('refresh-episodes-btn'),
+  diagnosticsText: document.getElementById('diagnostics-text')
 };
 const state = {
   isBusy: false,
   qualityStage: 'idle',
   playbackMode: initialPlaybackMode
 };
+
+
+function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return 'unknown';
+  }
+  const mb = bytes / (1024 * 1024);
+  if (mb < 1024) {
+    return `${mb.toFixed(1)} MB`;
+  }
+  return `${(mb / 1024).toFixed(2)} GB`;
+}
+function truncateUrl(value, max = 110) {
+  const text = String(value || '').trim();
+  if (!text) {
+    return 'n/a';
+  }
+  if (text.length <= max) {
+    return text;
+  }
+  return `${text.slice(0, max - 3)}...`;
+}
+function updateDiagnostics(diagnostics = []) {
+  if (!elements.diagnosticsText) {
+    return;
+  }
+  const latest = Array.isArray(diagnostics) && diagnostics.length ? diagnostics[diagnostics.length - 1] : null;
+  const now = new Date().toISOString();
+  if (!latest) {
+    elements.diagnosticsText.textContent = [
+      `mode=${state.playbackMode}`,
+      `xboxSafeMode=${xboxSafeMode ? 'on' : 'off'}`,
+      `ua=${truncateUrl(typeof navigator === 'undefined' ? '' : navigator.userAgent, 96)}`,
+      `lastEvent=none`,
+      `updatedAt=${now}`
+    ].join('\n');
+    return;
+  }
+  const lines = [
+    `mode=${state.playbackMode}`,
+    `xboxSafeMode=${xboxSafeMode ? 'on' : 'off'}`,
+    `event=${latest.type || 'unknown'}`,
+    `season=${latest.season || '-'} episode=${latest.episode || '-'} requestQuality=${latest.requestedQuality || '-'}`,
+    `resolvedQuality=${latest.resolvedQuality || latest.quality || '-'} contentLength=${formatBytes(latest.contentLength || latest.bytesReceived || 0)}`,
+    `message=${latest.message ? String(latest.message) : '-'}`,
+    `source=${truncateUrl(latest.sourceUrl || '')}`,
+    `eventsTracked=${diagnostics.length}`,
+    `updatedAt=${latest.at || now}`
+  ];
+  elements.diagnosticsText.textContent = lines.join('\n');
+}
 
 function setStatus(message, isError = false) {
   elements.status.textContent = message;
@@ -226,7 +279,9 @@ function applyPlaybackMode(mode, options = {}) {
   if (persist) {
     writeStoredPlaybackMode(parsed);
   }
+  updateDiagnostics(taskQueue.getDiagnosticsSnapshot());
 }
+
 function setBusy(isBusy) {
   state.isBusy = isBusy;
   elements.seasonSelect.disabled = isBusy;
@@ -258,10 +313,15 @@ function scheduleFfmpegWarmup() {
 const taskQueue = createTaskQueue({
   fetchSourceByEpisode,
   fetchSourceBatch,
+  fetchSourceLadder,
   getApiBaseUrl,
   bootstrapQuality,
   enableOutputCache: !xboxSafeMode,
-  releaseFfmpegAfterTask: xboxSafeMode
+  releaseFfmpegAfterTask: xboxSafeMode,
+  preferLowestQualityFromLadder: xboxSafeMode,
+  onDiagnostic(_event, list) {
+    updateDiagnostics(list);
+  }
 });
 const catalog = createCatalogController({
   elements,
@@ -323,6 +383,7 @@ async function init() {
   setProgress(0);
   setProgressText('');
   applyPlaybackMode(state.playbackMode, { persist: true, showStatus: false });
+  updateDiagnostics(taskQueue.getDiagnosticsSnapshot());
   setBusy(true);
   const loadedFromCache = catalog.tryLoadCatalogFromCache();
   if (loadedFromCache) {

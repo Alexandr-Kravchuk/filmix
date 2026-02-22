@@ -95,6 +95,8 @@ For weak devices you can enable minimal quality mode with the header button `Min
 - `Minimal quality mode: off` uses standard flow (`480 -> max`).
 - On Xbox Edge, safe mode is forced automatically: lowest quality only, no warmup, no prefetch, no HD upgrade.
 - In Xbox safe mode, ffmpeg instance is released after each prepared episode to reduce memory pressure.
+- In Xbox safe mode, frontend requests quality ladder and picks the lowest available source explicitly (helps when default `quality=1` mapping is inconsistent for some seasons).
+- Playback diagnostics panel shows selected source quality, content length and latest preparation/download event.
 
 You can force mode from URL:
 
@@ -181,6 +183,10 @@ npm run lint
 npm run test
 npm run build
 ```
+
+## Documentation
+
+- Latest changes analysis: [`docs/recent-changes-analysis.md`](docs/recent-changes-analysis.md)
 
 ## Smoke checks
 

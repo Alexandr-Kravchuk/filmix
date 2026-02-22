@@ -1,6 +1,7 @@
 import { remuxEnglishTrack, warmupFfmpeg } from './ffmpeg-engine.js';
 import { buildSourceCacheKey, readSourceUrl, writeSourceUrl, writeSourceUrls } from './source-cache.js';
 
+const DIAGNOSTIC_HISTORY_LIMIT = 40;
 const MAX_SOURCE_BYTES = 1024 * 1024 * 1024;
 const OUTPUT_CACHE_NAME = 'filmix-en-track-cache-v1';
 
@@ -85,9 +86,28 @@ export function buildOutputCacheId(season, episode, sourceUrl) {
 export function createTaskQueue(options) {
   const prepared = new Map();
   const tasks = new Map();
+  const diagnostics = [];
   const bootstrapQuality = normalizeQualityRequest(options.bootstrapQuality || 480);
   const enableOutputCache = options.enableOutputCache !== false;
   const releaseFfmpegAfterTask = options.releaseFfmpegAfterTask === true;
+  const preferLowestQualityFromLadder = options.preferLowestQualityFromLadder === true;
+
+  function pushDiagnostic(type, details = {}) {
+    diagnostics.push({
+      at: new Date().toISOString(),
+      type,
+      ...details
+    });
+    while (diagnostics.length > DIAGNOSTIC_HISTORY_LIMIT) {
+      diagnostics.shift();
+    }
+    if (typeof options.onDiagnostic === 'function') {
+      options.onDiagnostic(diagnostics[diagnostics.length - 1], diagnostics.slice());
+    }
+  }
+  function getDiagnosticsSnapshot() {
+    return diagnostics.slice();
+  }
   function getCacheKey(season, episode, sourceUrl) {
     return `https://filmix-cache.local/en-track/${encodeURIComponent(buildOutputCacheId(season, episode, sourceUrl))}`;
   }
@@ -130,7 +150,7 @@ export function createTaskQueue(options) {
       })
     );
   }
-  async function downloadSourceFile(url, onProgress) {
+  async function downloadSourceFile(url, onProgress, context = {}) {
     const response = await fetch(url);
     if (!response.ok || !response.body) {
       throw new Error(`Download failed: HTTP ${response.status}`);
@@ -140,8 +160,24 @@ export function createTaskQueue(options) {
       throw new Error(`Source URL is invalid or expired: expected video, got ${contentType}`);
     }
     const total = Number.parseInt(response.headers.get('content-length') || '0', 10);
+    pushDiagnostic('download_started', {
+      season: context.season,
+      episode: context.episode,
+      requestedQuality: context.requestedQuality || '',
+      sourceUrl: url,
+      contentType: contentType || '',
+      contentLength: Number.isFinite(total) ? total : 0
+    });
     if (Number.isFinite(total) && total > MAX_SOURCE_BYTES) {
-      throw new Error(`Source is too large (${Math.round(total / (1024 * 1024))}MB) for frontend processing`);
+      const sizeMb = Math.round(total / (1024 * 1024));
+      pushDiagnostic('download_rejected_too_large', {
+        season: context.season,
+        episode: context.episode,
+        requestedQuality: context.requestedQuality || '',
+        contentLength: total,
+        maxBytes: MAX_SOURCE_BYTES
+      });
+      throw new Error(`Source is too large (${sizeMb}MB) for frontend processing`);
     }
     const reader = response.body.getReader();
     if (total > 0) {
@@ -164,6 +200,12 @@ export function createTaskQueue(options) {
       if (received === 0) {
         throw new Error('Source URL returned empty response body');
       }
+      pushDiagnostic('download_completed', {
+        season: context.season,
+        episode: context.episode,
+        requestedQuality: context.requestedQuality || '',
+        bytesReceived: received
+      });
       if (received === merged.length) {
         return merged;
       }
@@ -190,14 +232,20 @@ export function createTaskQueue(options) {
     if (received === 0) {
       throw new Error('Source URL returned empty response body');
     }
+    pushDiagnostic('download_completed', {
+      season: context.season,
+      episode: context.episode,
+      requestedQuality: context.requestedQuality || '',
+      bytesReceived: received
+    });
     return concatChunks(chunks, received);
   }
   function isDownloadError(error) {
     const message = String(error && error.message ? error.message : '').toLowerCase();
     return message.startsWith('download failed:') || message.includes('invalid or expired') || message.includes('empty response body');
   }
-  async function buildOutputBlob(sourceUrl, setTaskProgress) {
-    const sourceBytes = await downloadSourceFile(sourceUrl, (downloadProgress) => setTaskProgress(0.05 + downloadProgress * 0.5));
+  async function buildOutputBlob(sourceUrl, setTaskProgress, context) {
+    const sourceBytes = await downloadSourceFile(sourceUrl, (downloadProgress) => setTaskProgress(0.05 + downloadProgress * 0.5), context);
     const outputBytes = await remuxEnglishTrack(
       sourceBytes,
       (ffmpegProgress) => setTaskProgress(0.6 + ffmpegProgress * 0.38),
@@ -226,6 +274,36 @@ export function createTaskQueue(options) {
     prepared.set(taskKey, entry);
     return entry;
   }
+  async function resolveLowestSourceFromLadder(season, episode) {
+    if (typeof options.fetchSourceLadder !== 'function') {
+      return null;
+    }
+    const payload = await options.fetchSourceLadder(season, episode);
+    const sources = Array.isArray(payload && payload.sources) ? payload.sources : [];
+    let best = null;
+    for (const item of sources) {
+      if (!item || typeof item.sourceUrl !== 'string') {
+        continue;
+      }
+      const sourceUrl = resolveSourceUrl(item.sourceUrl);
+      const quality = parseQualityFromPayload(item.quality, sourceUrl);
+      if (!(quality > 0)) {
+        continue;
+      }
+      if (!best || quality < best.quality) {
+        best = { sourceUrl, quality };
+      }
+    }
+    if (best) {
+      pushDiagnostic('ladder_lowest_selected', {
+        season,
+        episode,
+        quality: best.quality,
+        sourceUrl: best.sourceUrl
+      });
+    }
+    return best;
+  }
   async function resolveSourceForEpisode(season, episode, qualityRequest) {
     const normalizedQuality = normalizeQualityRequest(qualityRequest);
     const sourceKey = buildSourceCacheKey(season, episode, normalizedQuality);
@@ -236,6 +314,22 @@ export function createTaskQueue(options) {
         sourceUrl,
         quality: parseSourceQualityFromUrl(sourceUrl)
       };
+    }
+    if (preferLowestQualityFromLadder && normalizedQuality !== 'max') {
+      try {
+        const lowest = await resolveLowestSourceFromLadder(season, episode);
+        if (lowest) {
+          writeSourceUrl(sourceKey, lowest.sourceUrl);
+          writeSourceUrl(buildSourceCacheKey(season, episode, lowest.quality), lowest.sourceUrl);
+          return lowest;
+        }
+      } catch (error) {
+        pushDiagnostic('ladder_fetch_failed', {
+          season,
+          episode,
+          message: String(error && error.message ? error.message : error)
+        });
+      }
     }
     const payload = await options.fetchSourceByEpisode(season, episode, normalizedQuality);
     const sourceUrl = resolveSourceUrl(payload.sourceUrl);
@@ -314,14 +408,31 @@ export function createTaskQueue(options) {
       if (source.quality > 0) {
         task.qualityLabel = normalizeQualityLabel(source.quality);
       }
+      pushDiagnostic('source_selected', {
+        season,
+        episode,
+        requestedQuality: normalizedQuality,
+        resolvedQuality: source.quality || 0,
+        sourceUrl: source.sourceUrl
+      });
       let outputBlob = await loadCachedOutput(season, episode, source.sourceUrl);
       if (outputBlob) {
         setTaskProgress(0.98);
       } else {
         try {
-          outputBlob = await buildOutputBlob(source.sourceUrl, setTaskProgress);
+          outputBlob = await buildOutputBlob(source.sourceUrl, setTaskProgress, {
+            season,
+            episode,
+            requestedQuality: normalizedQuality
+          });
           await saveCachedOutput(season, episode, source.sourceUrl, outputBlob);
         } catch (error) {
+          pushDiagnostic('prepare_failed', {
+            season,
+            episode,
+            requestedQuality: normalizedQuality,
+            message: String(error && error.message ? error.message : error)
+          });
           if (!isDownloadError(error)) {
             throw error;
           }
@@ -345,7 +456,11 @@ export function createTaskQueue(options) {
           }
           outputBlob = await loadCachedOutput(season, episode, source.sourceUrl);
           if (!outputBlob) {
-            outputBlob = await buildOutputBlob(source.sourceUrl, setTaskProgress);
+            outputBlob = await buildOutputBlob(source.sourceUrl, setTaskProgress, {
+              season,
+              episode,
+              requestedQuality: normalizedQuality
+            });
             await saveCachedOutput(season, episode, source.sourceUrl, outputBlob);
           } else {
             setTaskProgress(0.98);
@@ -415,6 +530,7 @@ export function createTaskQueue(options) {
     isPreparedAtQuality,
     trimPreparedEntries,
     primeSourcesFromBatch,
-    warmup
+    warmup,
+    getDiagnosticsSnapshot
   };
 }
