@@ -151,3 +151,25 @@ video {
     font-size: 1.3rem;
   }
 }
+
+.diagnostics {
+  border: 1px solid #304259;
+  border-radius: 12px;
+  padding: 12px;
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+}
+.diagnostics h2 {
+  margin: 0 0 8px;
+  font-size: 0.95rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+.diagnostics-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.76rem;
+  color: #cfe6ff;
+  line-height: 1.35;
+}
