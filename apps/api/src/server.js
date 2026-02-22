@@ -271,14 +271,7 @@ export function createApp(config) {
     };
   }
   function pickCatalogSource(data) {
-    const priority = ['uk', 'ru', 'en'];
-    for (const lang of priority) {
-      const source = data.sources.find((item) => item.lang === lang);
-      if (source) {
-        return source;
-      }
-    }
-    return null;
+    return data.sources.find((item) => item.lang === 'en') || null;
   }
   async function resolveCatalogLadderData(season, episode, context = {}) {
     let catalog = null;

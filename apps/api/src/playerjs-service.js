@@ -111,11 +111,11 @@ export function pickTranslation(videoTranslations, preferredTranslationPattern) 
       return preferred;
     }
   }
-  const ukrainian = entries.find(([name]) => /ukr|укра/i.test(name));
-  if (ukrainian) {
-    return ukrainian;
+  const english = entries.find(([name]) => /eng|english|англ|ориг|original/i.test(name));
+  if (english) {
+    return english;
   }
-  return entries[0];
+  return null;
 }
 
 export function findEpisodeSourceUrl(playlistJson, season, episode, preferredQuality) {
