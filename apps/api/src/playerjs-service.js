@@ -51,6 +51,9 @@ function normalizeQualityPreference(preferredQuality) {
     return Number.MAX_SAFE_INTEGER;
   }
   const normalized = String(preferredQuality).trim().toLowerCase();
+  if (normalized === 'min' || normalized === 'lowest' || normalized === 'low') {
+    return 1;
+  }
   if (normalized === 'max' || normalized === 'highest' || normalized === 'best') {
     return Number.MAX_SAFE_INTEGER;
   }

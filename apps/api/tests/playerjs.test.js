@@ -148,6 +148,7 @@ test('picks exact, then lower, then minimum quality', () => {
   assert.equal(pickVariant(variants, 900).url, 'v720');
   assert.equal(pickVariant(variants, 360).url, 'v480');
   assert.equal(pickVariant(variants, 'max').url, 'v1080');
+  assert.equal(pickVariant(variants, 'min').url, 'v480');
 });
 
 test('throws when episode is missing in decoded playlist', async () => {

@@ -55,6 +55,9 @@ function parsePreferredQuality(value) {
   if (!normalized || normalized === 'max' || normalized === 'highest' || normalized === 'best') {
     return Number.MAX_SAFE_INTEGER;
   }
+  if (normalized === 'min' || normalized === 'lowest' || normalized === 'low') {
+    return 1;
+  }
   const parsed = Number.parseInt(normalized, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) {
     return Number.MAX_SAFE_INTEGER;
@@ -130,6 +133,9 @@ function parseQualityQuery(value, defaultValue = 'max') {
   const normalized = String(value).trim().toLowerCase();
   if (normalized === 'max' || normalized === 'highest' || normalized === 'best') {
     return 'max';
+  }
+  if (normalized === 'min' || normalized === 'lowest' || normalized === 'low') {
+    return '1';
   }
   const parsed = Number.parseInt(normalized, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) {

@@ -109,6 +109,9 @@ test('serves show, episode, play and har import', async () => {
   const sourceByQualityResponse = await request(app).get('/api/source').query({ season: 1, episode: 2, quality: 360 }).expect(200);
   assert.equal(sourceByQualityResponse.body.sourceUrl, 'https://cdn.example/ru/s01e02_720.mp4');
   assert.equal(sourceByQualityResponse.body.quality, 720);
+  const sourceByMinQualityResponse = await request(app).get('/api/source').query({ season: 1, episode: 2, quality: 'min' }).expect(200);
+  assert.equal(sourceByMinQualityResponse.body.sourceUrl, 'https://cdn.example/ru/s01e02_720.mp4');
+  assert.equal(sourceByMinQualityResponse.body.quality, 720);
   const sourceLadderResponse = await request(app).get('/api/source-ladder').query({ season: 1, episode: 2 }).expect(200);
   assert.equal(sourceLadderResponse.body.season, 1);
   assert.equal(sourceLadderResponse.body.episode, 2);
