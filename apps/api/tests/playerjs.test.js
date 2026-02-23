@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { decodePlayerjsValue, findEpisodeVariants, pickTranslation, pickVariant, resolveEpisodeSourceFromPlayerData } from '../src/playerjs-service.js';
+import { decodePlayerjsValue, findEpisodeVariants, pickTranslation, pickVariant, resolveEpisodeSourceFromPlayerData, resolvePlaylistUrlsFromPlayerData } from '../src/playerjs-service.js';
 
 const decodeConfig = Object.freeze({
   file3Separator: ':<:',
@@ -188,6 +188,92 @@ test('throws when episode is missing in decoded playlist', async () => {
         })
       }),
     /episode source was not found/
+  );
+});
+test('falls back to another translation playlist when preferred translation misses episode', async () => {
+  const ukrainianPlaylistUrl = 'https://filmix.zip/pl/paw.ukr.txt';
+  const russianPlaylistUrl = 'https://filmix.zip/pl/paw.ru.txt';
+  const ukrainianPlaylist = [
+    {
+      title: 'Сезон 11',
+      folder: [
+        {
+          id: 's11e01',
+          file: '[480p]https://cdn.example/paw/s11e01_480.mp4'
+        }
+      ]
+    }
+  ];
+  const russianPlaylist = [
+    {
+      title: 'Сезон 12',
+      folder: [
+        {
+          id: 's12e01',
+          file: '[720p]https://cdn.example/paw/s12e01_720.mp4,[1080p]https://cdn.example/paw/s12e01_1080.mp4'
+        }
+      ]
+    }
+  ];
+  const playerData = {
+    message: {
+      translations: {
+        video: {
+          'Дубляж [Ukr, MEGOGO Voice]': encodePlayerjsValue(ukrainianPlaylistUrl),
+          'Дубляж [ru, SDI Media]': encodePlayerjsValue(russianPlaylistUrl)
+        }
+      }
+    }
+  };
+  const response = await resolveEpisodeSourceFromPlayerData(playerData, {
+    season: 12,
+    episode: 1,
+    preferredQuality: 1080,
+    preferredTranslationPattern: 'ukr|укра',
+    fetchImpl: async (url) => {
+      if (url === ukrainianPlaylistUrl) {
+        return {
+          ok: true,
+          status: 200,
+          async text() {
+            return encodePlayerjsValue(JSON.stringify(ukrainianPlaylist));
+          }
+        };
+      }
+      if (url === russianPlaylistUrl) {
+        return {
+          ok: true,
+          status: 200,
+          async text() {
+            return encodePlayerjsValue(JSON.stringify(russianPlaylist));
+          }
+        };
+      }
+      throw new Error(`Unexpected url ${url}`);
+    }
+  });
+  assert.equal(response.sourceUrl, 'https://cdn.example/paw/s12e01_1080.mp4');
+  assert.equal(response.translationName, 'Дубляж [ru, SDI Media]');
+  assert.equal(response.playlistUrl, russianPlaylistUrl);
+});
+test('returns ordered translation playlist candidates', () => {
+  const playerData = {
+    message: {
+      translations: {
+        video: {
+          'Дубляж [ru, SDI Media]': encodePlayerjsValue('https://filmix.zip/pl/ru.txt'),
+          'Original [English]': encodePlayerjsValue('https://filmix.zip/pl/en.txt'),
+          'Дубляж [Ukr, MEGOGO Voice]': encodePlayerjsValue('https://filmix.zip/pl/ukr.txt')
+        }
+      }
+    }
+  };
+  const ordered = resolvePlaylistUrlsFromPlayerData(playerData, {
+    preferredTranslationPattern: 'ukr|укра'
+  });
+  assert.deepEqual(
+    ordered.map((item) => item.translationName),
+    ['Дубляж [Ukr, MEGOGO Voice]', 'Original [English]', 'Дубляж [ru, SDI Media]']
   );
 });
 

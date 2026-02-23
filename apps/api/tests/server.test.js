@@ -193,6 +193,83 @@ test('returns tokenized ladder and batch payloads', async () => {
   assert.equal(batch.body.items.every((item) => typeof item.playbackUrl === 'string'), true);
   await request(app).get('/api/source-batch').query({ season: 5, episodes: '11,12', quality: 'bad' }).expect(400);
 });
+test('resolves season 12 episode 1 by falling back from ukrainian to another translation playlist', async () => {
+  const ukrainianPlaylistUrl = 'https://filmix.zip/pl/paw.ukr.txt';
+  const russianPlaylistUrl = 'https://filmix.zip/pl/paw.ru.txt';
+  const ukrainianPlaylist = encodePlayerjsValue(
+    JSON.stringify([
+      {
+        title: 'Сезон 11',
+        folder: [
+          {
+            id: 's11e01',
+            file: '[480p]https://cdn.example/paw/s11e01_480.mp4'
+          }
+        ]
+      }
+    ])
+  );
+  const russianPlaylist = encodePlayerjsValue(
+    JSON.stringify([
+      {
+        title: 'Сезон 12',
+        folder: [
+          {
+            id: 's12e01',
+            file: '[720p]https://cdn.example/paw/s12e01_720.mp4,[1080p]https://cdn.example/paw/s12e01_1080.mp4'
+          }
+        ]
+      }
+    ])
+  );
+  const app = createTestApp({
+    fixedSeason: 12,
+    fixedEpisode: 1,
+    fixedQuality: 1080,
+    playlistFetch: async (url) => {
+      if (url === ukrainianPlaylistUrl) {
+        return {
+          ok: true,
+          status: 200,
+          async text() {
+            return ukrainianPlaylist;
+          }
+        };
+      }
+      if (url === russianPlaylistUrl) {
+        return {
+          ok: true,
+          status: 200,
+          async text() {
+            return russianPlaylist;
+          }
+        };
+      }
+      throw new Error(`Unexpected playlist url ${url}`);
+    },
+    filmixClient: {
+      async getPlayerData() {
+        return {
+          message: {
+            translations: {
+              video: {
+                'Дубляж [Ukr, MEGOGO Voice]': encodePlayerjsValue(ukrainianPlaylistUrl),
+                'Дубляж [ru, SDI Media]': encodePlayerjsValue(russianPlaylistUrl)
+              }
+            },
+            links: []
+          }
+        };
+      }
+    }
+  });
+  const sourceResponse = await request(app).get('/api/source').query({ season: 12, episode: 1 }).expect(200);
+  assert.equal(sourceResponse.body.quality, 1080);
+  assert.equal(typeof sourceResponse.body.playbackUrl, 'string');
+  const ladderResponse = await request(app).get('/api/source-ladder').query({ season: 12, episode: 1 }).expect(200);
+  assert.equal(ladderResponse.body.maxQuality, 1080);
+  assert.equal(ladderResponse.body.sources.length, 2);
+});
 
 test('uses strict validation for season and episode', async () => {
   const app = createTestApp();

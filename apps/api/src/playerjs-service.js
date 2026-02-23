@@ -117,6 +117,39 @@ export function pickTranslation(videoTranslations, preferredTranslationPattern) 
   }
   return null;
 }
+function orderTranslationEntries(entries, preferredTranslationPattern) {
+  const ordered = [];
+  const consumed = new Set();
+  if (preferredTranslationPattern) {
+    const pattern = new RegExp(preferredTranslationPattern, 'i');
+    for (let index = 0; index < entries.length; index += 1) {
+      if (!pattern.test(entries[index][0])) {
+        continue;
+      }
+      ordered.push(entries[index]);
+      consumed.add(index);
+      break;
+    }
+  }
+  for (let index = 0; index < entries.length; index += 1) {
+    if (consumed.has(index)) {
+      continue;
+    }
+    if (!/eng|english|англ|ориг|original/i.test(entries[index][0])) {
+      continue;
+    }
+    ordered.push(entries[index]);
+    consumed.add(index);
+    break;
+  }
+  for (let index = 0; index < entries.length; index += 1) {
+    if (consumed.has(index)) {
+      continue;
+    }
+    ordered.push(entries[index]);
+  }
+  return ordered;
+}
 
 export function findEpisodeSourceUrl(playlistJson, season, episode, preferredQuality) {
   const variants = findEpisodeVariants(playlistJson, season, episode);
@@ -178,23 +211,34 @@ export function decodePlaylistJson(playlistText, decodeConfig = defaultDecodeCon
   }
 }
 export function resolvePlaylistUrlFromPlayerData(playerData, options = {}) {
+  const candidates = resolvePlaylistUrlsFromPlayerData(playerData, options);
+  return candidates[0];
+}
+export function resolvePlaylistUrlsFromPlayerData(playerData, options = {}) {
   const translations = getVideoTranslations(playerData);
   if (!translations) {
     throw new Error('player-data does not contain translations.video');
   }
-  const translation = pickTranslation(translations, options.preferredTranslationPattern);
-  if (!translation) {
+  const entries = Object.entries(translations).filter((entry) => typeof entry[1] === 'string' && entry[1].startsWith('#2'));
+  if (!entries.length) {
     throw new Error('player-data does not contain decodable translation entries');
   }
-  const [translationName, encodedPlaylistUrl] = translation;
-  const playlistUrl = decodePlayerjsValue(encodedPlaylistUrl, options.decodeConfig || defaultDecodeConfig);
-  if (!playlistUrl.startsWith('http')) {
+  const ordered = orderTranslationEntries(entries, options.preferredTranslationPattern);
+  const resolved = [];
+  for (const [translationName, encodedPlaylistUrl] of ordered) {
+    const playlistUrl = decodePlayerjsValue(encodedPlaylistUrl, options.decodeConfig || defaultDecodeConfig);
+    if (!playlistUrl.startsWith('http')) {
+      continue;
+    }
+    resolved.push({
+      translationName,
+      playlistUrl
+    });
+  }
+  if (!resolved.length) {
     throw new Error('decoded playlist url is invalid');
   }
-  return {
-    translationName,
-    playlistUrl
-  };
+  return resolved;
 }
 export async function fetchDecodedPlaylistJson(playlistUrl, options = {}) {
   const fetchImpl = options.fetchImpl || fetch;
@@ -217,18 +261,31 @@ export async function resolveEpisodeSourceFromPlayerData(playerData, options = {
   if (!Number.isFinite(season) || !Number.isFinite(episode)) {
     throw new Error('season and episode are required integers');
   }
-  const { translationName, playlistUrl } = resolvePlaylistUrlFromPlayerData(playerData, options);
-  const playlistJson = await fetchDecodedPlaylistJson(playlistUrl, options);
-  const variants = findEpisodeVariants(playlistJson, season, episode);
-  const selected = pickVariant(variants, options.preferredQuality || Number.MAX_SAFE_INTEGER);
-  if (!selected || !selected.url) {
-    throw new Error('episode source was not found in decoded playlist');
+  const candidates = resolvePlaylistUrlsFromPlayerData(playerData, options);
+  let lastFetchError = null;
+  for (const candidate of candidates) {
+    let playlistJson = null;
+    try {
+      playlistJson = await fetchDecodedPlaylistJson(candidate.playlistUrl, options);
+    } catch (error) {
+      lastFetchError = error;
+      continue;
+    }
+    const variants = findEpisodeVariants(playlistJson, season, episode);
+    const selected = pickVariant(variants, options.preferredQuality || Number.MAX_SAFE_INTEGER);
+    if (!selected || !selected.url) {
+      continue;
+    }
+    return {
+      sourceUrl: selected.url,
+      quality: selected.quality,
+      variants,
+      playlistUrl: candidate.playlistUrl,
+      translationName: candidate.translationName
+    };
   }
-  return {
-    sourceUrl: selected.url,
-    quality: selected.quality,
-    variants,
-    playlistUrl,
-    translationName
-  };
+  if (lastFetchError && candidates.length) {
+    throw lastFetchError;
+  }
+  throw new Error('episode source was not found in decoded playlist');
 }

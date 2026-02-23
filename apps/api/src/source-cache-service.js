@@ -1,4 +1,4 @@
-import { fetchDecodedPlaylistJson, findEpisodeVariants, pickVariant, resolvePlaylistUrlFromPlayerData } from './playerjs-service.js';
+import { fetchDecodedPlaylistJson, findEpisodeVariants, pickVariant, resolvePlaylistUrlsFromPlayerData } from './playerjs-service.js';
 
 function buildEpisodeKey(season, episode) {
   return `${season}:${episode}`;
@@ -157,25 +157,33 @@ export function createSourceCacheService(config = {}) {
     return runPlaylistRefresh(playlistUrl);
   }
   async function resolveLadderFromPlayerData(data, season, episode, forcePlaylistRefresh = false) {
-    const { playlistUrl } = resolvePlaylistUrlFromPlayerData(data, {
+    const candidates = resolvePlaylistUrlsFromPlayerData(data, {
       preferredTranslationPattern: config.preferredTranslationPattern,
       decodeConfig: config.decodeConfig
     });
-    const playlistJson = forcePlaylistRefresh ? await getPlaylistFresh(playlistUrl) : await getPlaylist(playlistUrl);
-    const variants = findEpisodeVariants(playlistJson, season, episode).map((variant) => ({
-      quality: variant.quality,
-      sourceUrl: variant.url,
-      origin: 'player-data'
-    }));
-    if (!variants.length) {
-      const error = new Error('episode source was not found in decoded playlist');
-      error.code = 'EPISODE_SOURCE_NOT_FOUND';
-      throw error;
+    for (const candidate of candidates) {
+      let playlistJson = null;
+      try {
+        playlistJson = forcePlaylistRefresh ? await getPlaylistFresh(candidate.playlistUrl) : await getPlaylist(candidate.playlistUrl);
+      } catch {
+        continue;
+      }
+      const variants = findEpisodeVariants(playlistJson, season, episode).map((variant) => ({
+        quality: variant.quality,
+        sourceUrl: variant.url,
+        origin: 'player-data'
+      }));
+      if (!variants.length) {
+        continue;
+      }
+      return {
+        sources: normalizeSourcesByQuality(variants),
+        origin: 'player-data'
+      };
     }
-    return {
-      sources: normalizeSourcesByQuality(variants),
-      origin: 'player-data'
-    };
+    const error = new Error('episode source was not found in decoded playlist');
+    error.code = 'EPISODE_SOURCE_NOT_FOUND';
+    throw error;
   }
   async function computeFreshLadder(season, episode) {
     let playerData = null;
