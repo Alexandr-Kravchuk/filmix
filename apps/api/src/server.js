@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { stat, mkdir, readFile, writeFile } from 'node:fs/promises';
 import dotenv from 'dotenv';
@@ -9,8 +10,8 @@ import { getDefaultEnglishMapPath, loadEnglishMap, saveEnglishMap } from './engl
 import { parseHarToEnglishMap } from './har-import-service.js';
 import { resolveEpisodeSourceFromPlayerData } from './playerjs-service.js';
 import { proxyVideoRequest } from './proxy-service.js';
-import { proxyVideoEnglishAudio } from './ffmpeg-service.js';
 import { createSourceCacheService } from './source-cache-service.js';
+import { createPlaybackTokenService } from './playback-token-service.js';
 
 function loadEnvFiles() {
   dotenv.config({ path: path.resolve(process.cwd(), 'apps/api/.env') });
@@ -27,11 +28,11 @@ function parseCorsOrigins(value) {
     .filter(Boolean);
 }
 
-function isAllowedOrigin(origin, allowedOrigins) {
+function isAllowedOrigin(origin, allowedOrigins, allowLocalhostOrigins) {
   if (!origin) {
     return true;
   }
-  if (origin.startsWith('http://localhost:')) {
+  if (allowLocalhostOrigins && origin.startsWith('http://localhost:')) {
     return true;
   }
   return allowedOrigins.includes(origin);
@@ -63,14 +64,6 @@ function parsePreferredQuality(value) {
     return Number.MAX_SAFE_INTEGER;
   }
   return parsed;
-}
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;');
 }
 function normalizePlaybackProgress(value) {
   if (!value || typeof value !== 'object') {
@@ -120,11 +113,22 @@ function parseProgressBody(value) {
   }
   return null;
 }
+function parsePositiveIntegerStrict(value) {
+  const normalized = String(value === undefined || value === null ? '' : value).trim();
+  if (!/^[1-9][0-9]*$/.test(normalized)) {
+    return null;
+  }
+  const parsed = Number.parseInt(normalized, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+  return parsed;
+}
 function parseEpisodesCsv(value) {
   return Array.from(new Set(String(value || '')
     .split(',')
-    .map((part) => Number.parseInt(part.trim(), 10))
-    .filter((part) => Number.isFinite(part) && part > 0))).sort((a, b) => a - b);
+    .map((part) => parsePositiveIntegerStrict(part))
+    .filter((part) => Number.isFinite(part)))).sort((a, b) => a - b);
 }
 function parseQualityQuery(value, defaultValue = 'max') {
   if (value === undefined || value === null || String(value).trim() === '') {
@@ -137,8 +141,8 @@ function parseQualityQuery(value, defaultValue = 'max') {
   if (normalized === 'min' || normalized === 'lowest' || normalized === 'low') {
     return '1';
   }
-  const parsed = Number.parseInt(normalized, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
+  const parsed = parsePositiveIntegerStrict(normalized);
+  if (!Number.isFinite(parsed)) {
     return null;
   }
   return String(parsed);
@@ -184,6 +188,34 @@ function pickSourceByQuality(sources, preferredQuality) {
   }
   return normalized[0];
 }
+function createRateLimiter(config = {}) {
+  const windowMs = Number.parseInt(String(config.windowMs || '60000'), 10);
+  const maxRequests = Number.parseInt(String(config.maxRequests || '60'), 10);
+  const safeWindowMs = Number.isFinite(windowMs) && windowMs > 0 ? windowMs : 60000;
+  const safeMaxRequests = Number.isFinite(maxRequests) && maxRequests > 0 ? maxRequests : 60;
+  const entries = new Map();
+  return function checkRateLimit(key, now = Date.now()) {
+    const normalizedKey = String(key || '').trim() || 'global';
+    const existing = entries.get(normalizedKey);
+    if (!existing || now >= existing.resetAt) {
+      entries.set(normalizedKey, {
+        count: 1,
+        resetAt: now + safeWindowMs
+      });
+      return false;
+    }
+    existing.count += 1;
+    if (existing.count > safeMaxRequests) {
+      return true;
+    }
+    entries.set(normalizedKey, existing);
+    return false;
+  };
+}
+function buildSourceKey(value) {
+  const normalized = String(value || '');
+  return createHash('sha256').update(normalized).digest('hex').slice(0, 16);
+}
 
 export function createApp(config) {
   const app = express();
@@ -195,52 +227,101 @@ export function createApp(config) {
   const fixedEnglishSource = config.fixedEnglishSource || '';
   const fixedLocalFilePath = config.fixedLocalFilePath || '';
   const fixedPublicMediaUrl = config.fixedPublicMediaUrl || '';
-  const fixedPublicMediaViaProxy = config.fixedPublicMediaViaProxy !== false;
   const fixedQuality = Number.parseInt(String(config.fixedQuality || '480'), 10);
   const preferredTranslationPattern = config.preferredTranslationPattern || 'ukr|укра';
   const playbackProgressPath = config.playbackProgressPath || '/tmp/filmix-playback-progress.json';
+  const allowLocalhostOrigins = config.allowLocalhostOrigins !== false;
+  const exposeHealthVersion = config.exposeHealthVersion === true;
+  const nodeEnv = String(config.nodeEnv || process.env.NODE_ENV || '').trim().toLowerCase();
+  const defaultPlaybackSecret = nodeEnv === 'production' ? '' : 'dev-playback-token-secret';
   const sourceCacheTtlMs = Number.parseInt(String(config.sourceCacheTtlMs || '1800000'), 10);
   const playlistCacheTtlMs = Number.parseInt(String(config.playlistCacheTtlMs || '600000'), 10);
   const playerDataCacheTtlMs = Number.parseInt(String(config.playerDataCacheTtlMs || '60000'), 10);
   const playlistFetch = config.playlistFetch || fetch;
+  const playbackTokenService = createPlaybackTokenService({
+    secret: config.playbackTokenSecret || defaultPlaybackSecret,
+    ttlSec: Number.parseInt(String(config.playbackTokenTtlSec || '60'), 10),
+    maxUses: Number.parseInt(String(config.playbackTokenMaxUses || '256'), 10)
+  });
+  const checkRateLimit = createRateLimiter({
+    windowMs: Number.parseInt(String(config.rateLimitWindowMs || '60000'), 10),
+    maxRequests: Number.parseInt(String(config.rateLimitMaxRequests || '60'), 10)
+  });
   let cache = null;
   let playbackProgress = null;
   let playbackProgressLoaded = false;
   let playbackProgressLoadPromise = null;
 
-  function toProxyPlayUrl(sourceUrl) {
-    return `/proxy/video?src=${encodeURIComponent(sourceUrl)}`;
+  function setSensitiveNoStore(res) {
+    res.setHeader('Cache-Control', 'no-store');
   }
-
-  function getFixedPlayUrl() {
-    if (fixedLocalFilePath) {
-      return '/media/fixed-episode.mp4';
+  function buildStreamUrl(token) {
+    return `/api/stream/${encodeURIComponent(token)}`;
+  }
+  function createPlaybackDescriptor(sourceData) {
+    const issued = playbackTokenService.issue({
+      sourceUrl: sourceData.sourceUrl || '',
+      localFilePath: sourceData.localFilePath || '',
+      sourceKey: sourceData.sourceKey || '',
+      origin: sourceData.origin || ''
+    });
+    return {
+      playbackToken: issued.token,
+      playbackUrl: buildStreamUrl(issued.token),
+      expiresAt: issued.expiresAt
+    };
+  }
+  function createSourceResponsePayload(season, episode, sourceData, quality, extra = {}) {
+    const descriptor = createPlaybackDescriptor(sourceData);
+    return {
+      season,
+      episode,
+      quality,
+      origin: sourceData.origin || '',
+      sourceKey: sourceData.sourceKey || '',
+      ...descriptor,
+      ...extra
+    };
+  }
+  function getStrictSeasonEpisode(query) {
+    const season = parsePositiveIntegerStrict(query.season);
+    const episode = parsePositiveIntegerStrict(query.episode);
+    if (!Number.isFinite(season) || !Number.isFinite(episode)) {
+      return null;
     }
-    if (fixedPublicMediaUrl) {
-      return fixedPublicMediaViaProxy ? toProxyPlayUrl(fixedPublicMediaUrl) : fixedPublicMediaUrl;
-    }
-    if (fixedEnglishSource) {
-      return toProxyPlayUrl(fixedEnglishSource);
-    }
-    return '';
+    return {
+      season,
+      episode
+    };
   }
   async function resolveFixedSourceData() {
     if (fixedLocalFilePath) {
+      const localQuality = parseSourceQualityFromUrl(fixedLocalFilePath);
+      const fallbackQuality = Number.isFinite(fixedQuality) && fixedQuality > 0 && fixedQuality < Number.MAX_SAFE_INTEGER ? fixedQuality : 0;
       return {
-        sourceUrl: '/media/fixed-episode.mp4',
-        origin: 'fixed-local'
+        sourceUrl: '',
+        localFilePath: fixedLocalFilePath,
+        origin: 'fixed-local',
+        sourceKey: buildSourceKey(`local:${fixedLocalFilePath}`),
+        quality: localQuality > 0 ? localQuality : fallbackQuality
       };
     }
     if (fixedPublicMediaUrl) {
       return {
         sourceUrl: fixedPublicMediaUrl,
-        origin: 'fixed-public'
+        localFilePath: '',
+        origin: 'fixed-public',
+        sourceKey: buildSourceKey(fixedPublicMediaUrl),
+        quality: parseSourceQualityFromUrl(fixedPublicMediaUrl)
       };
     }
     if (fixedEnglishSource) {
       return {
         sourceUrl: fixedEnglishSource,
-        origin: 'fixed-env'
+        localFilePath: '',
+        origin: 'fixed-env',
+        sourceKey: buildSourceKey(fixedEnglishSource),
+        quality: parseSourceQualityFromUrl(fixedEnglishSource)
       };
     }
     const playerData = await config.filmixClient.getPlayerData();
@@ -255,7 +336,10 @@ export function createApp(config) {
       });
       return {
         sourceUrl: resolved.sourceUrl,
-        origin: 'player-data'
+        localFilePath: '',
+        origin: 'player-data',
+        sourceKey: buildSourceKey(resolved.sourceUrl),
+        quality: parseSourceQualityFromUrl(resolved.sourceUrl)
       };
     } catch {
     }
@@ -267,7 +351,10 @@ export function createApp(config) {
     }
     return {
       sourceUrl: source.sourceUrl,
-      origin: 'catalog'
+      localFilePath: '',
+      origin: 'catalog',
+      sourceKey: buildSourceKey(source.sourceUrl),
+      quality: parseSourceQualityFromUrl(source.sourceUrl)
     };
   }
   function pickCatalogSource(data) {
@@ -326,7 +413,12 @@ export function createApp(config) {
     if (season === fixedSeason && episode === fixedEpisode && (fixedLocalFilePath || fixedPublicMediaUrl || fixedEnglishSource)) {
       return resolveFixedSourceData();
     }
-    return sourceCacheService.resolveEpisodeSource(season, episode, preferredQuality);
+    const resolved = await sourceCacheService.resolveEpisodeSource(season, episode, preferredQuality);
+    return {
+      ...resolved,
+      localFilePath: '',
+      sourceKey: buildSourceKey(resolved.sourceUrl)
+    };
   }
 
   async function sendLocalVideo(filePath, req, res) {
@@ -427,7 +519,7 @@ export function createApp(config) {
 
   app.use((req, res, next) => {
     const origin = req.headers.origin;
-    if (isAllowedOrigin(origin, allowedOrigins)) {
+    if (isAllowedOrigin(origin, allowedOrigins, allowLocalhostOrigins)) {
       if (origin) {
         res.setHeader('Access-Control-Allow-Origin', origin);
       }
@@ -443,12 +535,33 @@ export function createApp(config) {
     }
     res.status(403).json({ error: 'CORS origin is not allowed' });
   });
+  app.use((req, res, next) => {
+    const route = String(req.path || '');
+    if (!route.startsWith('/api/source')
+      && !route.startsWith('/api/episode')
+      && !route.startsWith('/api/playback-token')
+      && !route.startsWith('/api/stream/')
+      && route !== '/api/play'
+      && route !== '/api/fixed-episode') {
+      next();
+      return;
+    }
+    const ip = String(req.headers['x-forwarded-for'] || req.ip || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
+    const key = `${ip}:${route}`;
+    if (checkRateLimit(key)) {
+      setSensitiveNoStore(res);
+      res.status(429).json({ error: 'Too many requests' });
+      return;
+    }
+    next();
+  });
 
   app.get('/api/health', (req, res) => {
-    res.json({
-      ok: true,
-      version: config.version || 'dev'
-    });
+    const payload = { ok: true };
+    if (exposeHealthVersion) {
+      payload.version = config.version || 'dev';
+    }
+    res.json(payload);
   });
   app.get('/api/progress', async (req, res, next) => {
     try {
@@ -499,26 +612,39 @@ export function createApp(config) {
 
   app.get('/api/fixed-episode', async (req, res, next) => {
     try {
-      const fixedPlayUrl = getFixedPlayUrl();
-      if (fixedPlayUrl) {
-        const sourceData = await resolveFixedSourceData();
-        res.json({
-          season: fixedSeason,
-          episode: fixedEpisode,
-          playUrl: fixedPlayUrl,
-          sourceUrl: sourceData.sourceUrl,
-          origin: sourceData.origin
-        });
+      const sourceData = await resolveFixedSourceData();
+      const quality = Number.isFinite(sourceData.quality) && sourceData.quality > 0
+        ? sourceData.quality
+        : parseSourceQualityFromUrl(sourceData.sourceUrl);
+      const payload = createSourceResponsePayload(fixedSeason, fixedEpisode, sourceData, quality);
+      setSensitiveNoStore(res);
+      res.json({
+        ...payload,
+        playUrl: payload.playbackUrl
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+  app.post('/api/playback-token', async (req, res, next) => {
+    try {
+      const params = getStrictSeasonEpisode(req.body || {});
+      if (!params) {
+        res.status(400).json({ error: 'season and episode are required positive integers' });
         return;
       }
-      const sourceData = await resolveFixedSourceData();
-      res.json({
-        season: fixedSeason,
-        episode: fixedEpisode,
-        playUrl: toProxyPlayUrl(sourceData.sourceUrl),
-        sourceUrl: sourceData.sourceUrl,
-        origin: sourceData.origin
-      });
+      const preferredQuality = parseQualityQuery(req.body && req.body.quality, 'max');
+      if (!preferredQuality) {
+        res.status(400).json({ error: 'quality must be integer or "max"' });
+        return;
+      }
+      const sourceData = await resolveSourceDataForEpisode(params.season, params.episode, preferredQuality);
+      const quality = Number.isFinite(sourceData.quality) && sourceData.quality > 0
+        ? sourceData.quality
+        : parseSourceQualityFromUrl(sourceData.sourceUrl);
+      const payload = createSourceResponsePayload(params.season, params.episode, sourceData, quality);
+      setSensitiveNoStore(res);
+      res.json(payload);
     } catch (error) {
       next(error);
     }
@@ -534,71 +660,78 @@ export function createApp(config) {
       }
       if (!hasSeason && !hasEpisode) {
         const sourceData = await resolveFixedSourceData();
-        setMetadataCacheHeader(res);
-        res.json({
-          season: fixedSeason,
-          episode: fixedEpisode,
-          sourceUrl: sourceData.sourceUrl,
-          origin: sourceData.origin,
-          quality: parseSourceQualityFromUrl(sourceData.sourceUrl)
-        });
+        const quality = Number.isFinite(sourceData.quality) && sourceData.quality > 0
+          ? sourceData.quality
+          : parseSourceQualityFromUrl(sourceData.sourceUrl);
+        const payload = createSourceResponsePayload(fixedSeason, fixedEpisode, sourceData, quality);
+        setSensitiveNoStore(res);
+        res.json(payload);
         return;
       }
-      const season = Number.parseInt(String(req.query.season || ''), 10);
-      const episode = Number.parseInt(String(req.query.episode || ''), 10);
-      if (!Number.isFinite(season) || !Number.isFinite(episode)) {
-        res.status(400).json({ error: 'season and episode are required integers' });
+      if (hasSeason !== hasEpisode) {
+        res.status(400).json({ error: 'season and episode are required positive integers' });
         return;
       }
-      const sourceData = await resolveSourceDataForEpisode(season, episode, preferredQuality);
-      setMetadataCacheHeader(res);
-      res.json({
-        season,
-        episode,
-        sourceUrl: sourceData.sourceUrl,
-        origin: sourceData.origin,
-        quality: sourceData.quality
-      });
+      const params = getStrictSeasonEpisode(req.query);
+      if (!params) {
+        res.status(400).json({ error: 'season and episode are required positive integers' });
+        return;
+      }
+      const sourceData = await resolveSourceDataForEpisode(params.season, params.episode, preferredQuality);
+      const quality = Number.isFinite(sourceData.quality) && sourceData.quality > 0
+        ? sourceData.quality
+        : parseSourceQualityFromUrl(sourceData.sourceUrl);
+      const payload = createSourceResponsePayload(params.season, params.episode, sourceData, quality);
+      setSensitiveNoStore(res);
+      res.json(payload);
     } catch (error) {
       next(error);
     }
   });
   app.get('/api/source-ladder', async (req, res, next) => {
     try {
-      const season = Number.parseInt(String(req.query.season || ''), 10);
-      const episode = Number.parseInt(String(req.query.episode || ''), 10);
-      if (!Number.isFinite(season) || season <= 0 || !Number.isFinite(episode) || episode <= 0) {
-        res.status(400).json({ error: 'season and episode are required integers' });
+      const params = getStrictSeasonEpisode(req.query);
+      if (!params) {
+        res.status(400).json({ error: 'season and episode are required positive integers' });
         return;
       }
-      if (season === fixedSeason && episode === fixedEpisode && (fixedLocalFilePath || fixedPublicMediaUrl || fixedEnglishSource)) {
+      if (params.season === fixedSeason && params.episode === fixedEpisode && (fixedLocalFilePath || fixedPublicMediaUrl || fixedEnglishSource)) {
         const sourceData = await resolveFixedSourceData();
-        const quality = parseSourceQualityFromUrl(sourceData.sourceUrl);
-        setMetadataCacheHeader(res);
+        const quality = Number.isFinite(sourceData.quality) && sourceData.quality > 0
+          ? sourceData.quality
+          : parseSourceQualityFromUrl(sourceData.sourceUrl);
+        const entry = createSourceResponsePayload(params.season, params.episode, sourceData, quality);
+        setSensitiveNoStore(res);
         res.json({
-          season,
-          episode,
+          season: params.season,
+          episode: params.episode,
           bootstrapQuality: 480,
           maxQuality: quality,
-          sources: [{
-            quality,
-            sourceUrl: sourceData.sourceUrl,
-            origin: sourceData.origin
-          }],
+          sources: [entry],
           generatedAt: Date.now()
         });
         return;
       }
-      const ladder = await sourceCacheService.resolveEpisodeSourceLadder(season, episode);
+      const ladder = await sourceCacheService.resolveEpisodeSourceLadder(params.season, params.episode);
       const normalizedSources = [...(Array.isArray(ladder.sources) ? ladder.sources : [])].sort((a, b) => a.quality - b.quality);
       const maxQualitySource = pickSourceByQuality(normalizedSources, 'max');
-      setMetadataCacheHeader(res);
+      const sources = normalizedSources.map((item) => {
+        const sourceData = {
+          sourceUrl: item.sourceUrl,
+          localFilePath: '',
+          origin: item.origin || ladder.origin || '',
+          sourceKey: buildSourceKey(item.sourceUrl)
+        };
+        const quality = Number.isFinite(item.quality) && item.quality > 0 ? item.quality : parseSourceQualityFromUrl(item.sourceUrl);
+        return createSourceResponsePayload(params.season, params.episode, sourceData, quality);
+      });
+      setSensitiveNoStore(res);
       res.json({
-        season,
-        episode,
+        season: params.season,
+        episode: params.episode,
         bootstrapQuality: 480,
         maxQuality: maxQualitySource ? maxQualitySource.quality : 0,
-        sources: normalizedSources,
+        sources,
         generatedAt: Date.now()
       });
     } catch (error) {
@@ -607,11 +740,11 @@ export function createApp(config) {
   });
   app.get('/api/source-batch', async (req, res, next) => {
     try {
-      const season = Number.parseInt(String(req.query.season || ''), 10);
+      const season = parsePositiveIntegerStrict(req.query.season);
       const episodes = parseEpisodesCsv(req.query.episodes);
       const preferredQuality = parseQualityQuery(req.query.quality, 'max');
-      if (!Number.isFinite(season) || season <= 0) {
-        res.status(400).json({ error: 'season is required integer' });
+      if (!Number.isFinite(season)) {
+        res.status(400).json({ error: 'season is required positive integer' });
         return;
       }
       if (!episodes.length) {
@@ -622,8 +755,27 @@ export function createApp(config) {
         res.status(400).json({ error: 'quality must be integer or "max"' });
         return;
       }
-      const items = await sourceCacheService.resolveEpisodeSourcesBatch(season, episodes, preferredQuality);
-      setMetadataCacheHeader(res);
+      const resolvedItems = await sourceCacheService.resolveEpisodeSourcesBatch(season, episodes, preferredQuality);
+      const items = resolvedItems.map((item) => {
+        const sourceData = {
+          sourceUrl: item.sourceUrl,
+          localFilePath: '',
+          origin: item.origin || '',
+          sourceKey: buildSourceKey(item.sourceUrl)
+        };
+        const quality = Number.isFinite(item.quality) && item.quality > 0 ? item.quality : parseSourceQualityFromUrl(item.sourceUrl);
+        const payload = createSourceResponsePayload(season, item.episode, sourceData, quality);
+        return {
+          episode: item.episode,
+          quality: payload.quality,
+          origin: payload.origin,
+          sourceKey: payload.sourceKey,
+          playbackToken: payload.playbackToken,
+          playbackUrl: payload.playbackUrl,
+          expiresAt: payload.expiresAt
+        };
+      });
+      setSensitiveNoStore(res);
       res.json({
         season,
         items,
@@ -636,19 +788,28 @@ export function createApp(config) {
 
   app.get('/api/episode', async (req, res, next) => {
     try {
-      const season = Number.parseInt(String(req.query.season || ''), 10);
-      const episode = Number.parseInt(String(req.query.episode || ''), 10);
-      if (!Number.isFinite(season) || !Number.isFinite(episode)) {
-        res.status(400).json({ error: 'season and episode are required integers' });
+      const params = getStrictSeasonEpisode(req.query);
+      if (!params) {
+        res.status(400).json({ error: 'season and episode are required positive integers' });
         return;
       }
       const catalog = await buildCatalogSnapshot();
-      const data = getEpisodeData(catalog, season, episode);
+      const data = getEpisodeData(catalog, params.season, params.episode);
       if (!data.sources.length) {
         res.status(404).json({ error: 'Episode not found or no sources available' });
         return;
       }
-      res.json(data);
+      setSensitiveNoStore(res);
+      res.json({
+        season: params.season,
+        episode: params.episode,
+        defaultLang: data.defaultLang,
+        sources: data.sources.map((item) => ({
+          lang: item.lang,
+          label: item.label,
+          quality: parseSourceQualityFromUrl(item.sourceUrl)
+        }))
+      });
     } catch (error) {
       next(error);
     }
@@ -656,14 +817,36 @@ export function createApp(config) {
 
   app.get('/api/play', async (req, res, next) => {
     try {
-      const seasonQuery = Number.parseInt(String(req.query.season || ''), 10);
-      const episodeQuery = Number.parseInt(String(req.query.episode || ''), 10);
-      const season = Number.isFinite(seasonQuery) ? seasonQuery : fixedSeason;
-      const episode = Number.isFinite(episodeQuery) ? episodeQuery : fixedEpisode;
-      const lang = String(req.query.lang || 'en');
-      const fixedPlayUrl = getFixedPlayUrl();
-      if (!Number.isFinite(seasonQuery) && !Number.isFinite(episodeQuery) && lang === 'en' && fixedPlayUrl) {
-        res.redirect(fixedPlayUrl);
+      const hasSeason = Object.hasOwn(req.query, 'season');
+      const hasEpisode = Object.hasOwn(req.query, 'episode');
+      if (hasSeason !== hasEpisode) {
+        res.status(400).json({ error: 'season and episode should be provided together' });
+        return;
+      }
+      let season = fixedSeason;
+      let episode = fixedEpisode;
+      if (hasSeason && hasEpisode) {
+        const parsed = getStrictSeasonEpisode(req.query);
+        if (!parsed) {
+          res.status(400).json({ error: 'season and episode are required positive integers' });
+          return;
+        }
+        season = parsed.season;
+        episode = parsed.episode;
+      }
+      const lang = String(req.query.lang || 'en').trim().toLowerCase();
+      if (!/^[a-z]{2,3}$/.test(lang)) {
+        res.status(400).json({ error: 'lang should be a 2-3 letter code' });
+        return;
+      }
+      if (season === fixedSeason && episode === fixedEpisode && (fixedLocalFilePath || fixedPublicMediaUrl || fixedEnglishSource) && lang === 'en') {
+        const fixedSource = await resolveFixedSourceData();
+        const fixedQualityValue = Number.isFinite(fixedSource.quality) && fixedSource.quality > 0
+          ? fixedSource.quality
+          : parseSourceQualityFromUrl(fixedSource.sourceUrl);
+        const payload = createSourceResponsePayload(season, episode, fixedSource, fixedQualityValue, { lang });
+        setSensitiveNoStore(res);
+        res.redirect(payload.playbackUrl);
         return;
       }
       const catalog = await buildCatalogSnapshot();
@@ -673,70 +856,32 @@ export function createApp(config) {
         res.status(404).json({ error: 'Language source is not available' });
         return;
       }
-      res.redirect(toProxyPlayUrl(source.sourceUrl));
+      const sourceData = {
+        sourceUrl: source.sourceUrl,
+        localFilePath: '',
+        origin: 'catalog',
+        sourceKey: buildSourceKey(source.sourceUrl)
+      };
+      const payload = createSourceResponsePayload(season, episode, sourceData, parseSourceQualityFromUrl(source.sourceUrl), { lang });
+      setSensitiveNoStore(res);
+      res.redirect(payload.playbackUrl);
     } catch (error) {
       next(error);
     }
   });
-  app.get('/watch', (req, res) => {
-    const src = String(req.query.src || '');
-    if (!src) {
-      res.status(400).send('Missing src query parameter');
-      return;
-    }
-    const playUrl = `/proxy/video-en?src=${encodeURIComponent(src)}`;
-    const html = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Video Player</title>
-<style>
-html,body{margin:0;height:100%;background:#0b1220;color:#fff;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
-main{height:100%;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
-video{width:min(100%,1200px);max-height:90vh;background:#000}
-</style>
-</head>
-<body>
-<main>
-<video controls playsinline preload="metadata" src="${escapeHtml(playUrl)}"></video>
-</main>
-</body>
-</html>`;
-    res.status(200).setHeader('Content-Type', 'text/html; charset=utf-8').send(html);
-  });
-
-  app.get('/proxy/video', async (req, res, next) => {
+  app.get('/api/stream/:token', async (req, res, next) => {
     try {
+      const playbackData = playbackTokenService.consume(req.params.token);
+      setSensitiveNoStore(res);
+      if (playbackData.localFilePath) {
+        await sendLocalVideo(playbackData.localFilePath, req, res);
+        return;
+      }
       await proxyVideoRequest(req, res, {
+        sourceUrl: playbackData.sourceUrl,
         referer: config.pageUrl,
         userAgent: config.userAgent
       });
-    } catch (error) {
-      next(error);
-    }
-  });
-  app.get('/proxy/video-en', async (req, res, next) => {
-    try {
-      await proxyVideoEnglishAudio(req, res, {
-        referer: config.pageUrl,
-        userAgent: config.userAgent,
-        cacheDir: config.mediaCacheDir,
-        ffmpegBin: config.ffmpegBin,
-        ffprobeBin: config.ffprobeBin
-      });
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  app.get('/media/fixed-episode.mp4', async (req, res, next) => {
-    try {
-      if (!fixedLocalFilePath) {
-        res.status(404).json({ error: 'Fixed local media is not configured' });
-        return;
-      }
-      await sendLocalVideo(fixedLocalFilePath, req, res);
     } catch (error) {
       next(error);
     }
@@ -779,6 +924,7 @@ export function createRuntimeConfig() {
   const userAgent = process.env.FILMIX_USER_AGENT || 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36';
   return {
     port: Number.parseInt(process.env.PORT || '3000', 10),
+    nodeEnv: process.env.NODE_ENV || '',
     version: process.env.APP_VERSION || process.env.RENDER_GIT_COMMIT || 'dev',
     corsOrigin: process.env.CORS_ORIGIN || '',
     adminToken: process.env.ADMIN_TOKEN || '',
@@ -788,18 +934,21 @@ export function createRuntimeConfig() {
     fixedEnglishSource: process.env.FIXED_ENGLISH_SOURCE || '',
     fixedLocalFilePath: process.env.FIXED_LOCAL_FILE_PATH || '',
     fixedPublicMediaUrl: process.env.FIXED_PUBLIC_MEDIA_URL || '',
-    fixedPublicMediaViaProxy: parseBoolean(process.env.FIXED_PUBLIC_MEDIA_VIA_PROXY, true),
     fixedQuality: parsePreferredQuality(process.env.FIXED_QUALITY || 'max'),
     preferredTranslationPattern: process.env.FILMIX_PREFERRED_TRANSLATION_PATTERN || 'ukr|укра',
     playbackProgressPath: process.env.PLAYBACK_PROGRESS_PATH || '/tmp/filmix-playback-progress.json',
+    playbackTokenSecret: process.env.PLAYBACK_TOKEN_SECRET || (process.env.NODE_ENV === 'production' ? '' : 'dev-playback-token-secret'),
+    playbackTokenTtlSec: Number.parseInt(process.env.PLAYBACK_TOKEN_TTL_SEC || '60', 10),
+    playbackTokenMaxUses: Number.parseInt(process.env.PLAYBACK_TOKEN_MAX_USES || '256', 10),
+    rateLimitWindowMs: Number.parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000', 10),
+    rateLimitMaxRequests: Number.parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '60', 10),
+    exposeHealthVersion: parseBoolean(process.env.EXPOSE_HEALTH_VERSION, process.env.NODE_ENV !== 'production'),
+    allowLocalhostOrigins: parseBoolean(process.env.ALLOW_LOCALHOST_ORIGINS, process.env.NODE_ENV !== 'production'),
     sourceCacheTtlMs: Number.parseInt(process.env.SOURCE_CACHE_TTL_MS || '1800000', 10),
     playlistCacheTtlMs: Number.parseInt(process.env.PLAYLIST_CACHE_TTL_MS || '600000', 10),
     playerDataCacheTtlMs: Number.parseInt(process.env.PLAYER_DATA_CACHE_TTL_MS || '60000', 10),
     pageUrl,
     userAgent,
-    mediaCacheDir: process.env.MEDIA_CACHE_DIR || '/tmp/filmix-cache',
-    ffmpegBin: process.env.FFMPEG_BIN || 'ffmpeg',
-    ffprobeBin: process.env.FFPROBE_BIN || 'ffprobe',
     filmixClient: new FilmixClient({
       pageUrl,
       login: process.env.FILMIX_LOGIN || '',

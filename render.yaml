@@ -23,12 +23,6 @@ services:
         sync: false
       - key: FILMIX_PREFERRED_TRANSLATION_PATTERN
         sync: false
-      - key: MEDIA_CACHE_DIR
-        value: /tmp/filmix-cache
-      - key: FFMPEG_BIN
-        value: ffmpeg
-      - key: FFPROBE_BIN
-        value: ffprobe
       - key: SHOW_TITLE
         sync: false
       - key: FIXED_SEASON
@@ -43,10 +37,22 @@ services:
         value: ""
       - key: FIXED_PUBLIC_MEDIA_URL
         value: ""
-      - key: FIXED_PUBLIC_MEDIA_VIA_PROXY
-        value: "true"
       - key: PLAYBACK_PROGRESS_PATH
         value: /tmp/filmix-playback-progress.json
+      - key: PLAYBACK_TOKEN_SECRET
+        sync: false
+      - key: PLAYBACK_TOKEN_TTL_SEC
+        value: "60"
+      - key: PLAYBACK_TOKEN_MAX_USES
+        value: "256"
+      - key: RATE_LIMIT_WINDOW_MS
+        value: "60000"
+      - key: RATE_LIMIT_MAX_REQUESTS
+        value: "60"
+      - key: EXPOSE_HEALTH_VERSION
+        value: "false"
+      - key: ALLOW_LOCALHOST_ORIGINS
+        value: "false"
       - key: SOURCE_CACHE_TTL_MS
         value: "1800000"
       - key: PLAYLIST_CACHE_TTL_MS

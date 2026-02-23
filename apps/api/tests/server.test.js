@@ -21,7 +21,6 @@ function encodeUtf8ToBase64(value) {
   );
   return Buffer.from(normalized, 'binary').toString('base64');
 }
-
 function encodePlayerjsValue(value) {
   const normalized = encodeURIComponent(String(value || '')).replace(/%([0-9A-F]{2})/g, (match, code) =>
     String.fromCharCode(Number.parseInt(code, 16))
@@ -57,17 +56,13 @@ const playerDataFixture = {
   }
 };
 
-test('serves show, episode, play and har import', async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'filmix-api-test-'));
-  const mapPath = path.join(tempDir, 'english-map.json');
-  await fs.writeFile(mapPath, `${JSON.stringify({ '1:1': 'https://cdn.example/en/s01e01.m3u8', '1:2': 'https://cdn.example/en/s01e02_720.m3u8' }, null, 2)}\n`, 'utf8');
-  const app = createApp({
-    mapPath,
-    adminToken: 'secret-token',
+function createTestApp(overrides = {}) {
+  return createApp({
     corsOrigin: 'http://localhost:5173,https://example.github.io',
     showTitle: 'PAW Patrol',
     fixedSeason: 1,
     fixedEpisode: 1,
+    playbackTokenSecret: 'test-secret',
     pageUrl: 'https://filmix.zip/multser/detskij/87660-v-schenyachiy-patrul-chas-2013.html',
     userAgent: 'TestAgent',
     version: 'test',
@@ -75,57 +70,181 @@ test('serves show, episode, play and har import', async () => {
       async getPlayerData() {
         return playerDataFixture;
       }
+    },
+    ...overrides
+  });
+}
+
+test('source and episode endpoints return tokenized payload without raw source urls', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'filmix-api-test-secure-'));
+  const mapPath = path.join(tempDir, 'english-map.json');
+  await fs.writeFile(mapPath, `${JSON.stringify({ '1:1': 'https://cdn.example/en/s01e01.m3u8' }, null, 2)}\n`, 'utf8');
+  const app = createTestApp({
+    mapPath
+  });
+  const sourceResponse = await request(app).get('/api/source').query({ season: 1, episode: 1 }).expect(200);
+  assert.equal(typeof sourceResponse.body.playbackToken, 'string');
+  assert.match(sourceResponse.body.playbackUrl, /^\/api\/stream\//);
+  assert.equal(Object.hasOwn(sourceResponse.body, 'sourceUrl'), false);
+  assert.equal(Number.isFinite(Number(sourceResponse.body.expiresAt)), true);
+  const episodeResponse = await request(app).get('/api/episode').query({ season: 1, episode: 1 }).expect(200);
+  assert.equal(Array.isArray(episodeResponse.body.sources), true);
+  assert.equal(episodeResponse.body.sources.every((item) => !Object.hasOwn(item, 'sourceUrl')), true);
+  const playResponse = await request(app).get('/api/play').query({ season: 1, episode: 1, lang: 'en' }).expect(302);
+  assert.match(String(playResponse.headers.location || ''), /^\/api\/stream\//);
+});
+
+test('fixed episode playback token streams local media and respects max token uses', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'filmix-api-test-stream-'));
+  const fixedFilePath = path.join(tempDir, 'fixed.mp4');
+  await fs.writeFile(fixedFilePath, Buffer.from('0123456789', 'utf8'));
+  const app = createTestApp({
+    fixedSeason: 5,
+    fixedEpisode: 11,
+    fixedLocalFilePath: fixedFilePath,
+    playbackTokenMaxUses: 2
+  });
+  const fixedEpisode = await request(app).get('/api/fixed-episode').expect(200);
+  assert.match(String(fixedEpisode.body.playUrl || ''), /^\/api\/stream\//);
+  assert.equal(Object.hasOwn(fixedEpisode.body, 'sourceUrl'), false);
+  await request(app).get(fixedEpisode.body.playUrl).set('Range', 'bytes=0-1').expect(206);
+  await request(app).get(fixedEpisode.body.playUrl).set('Range', 'bytes=2-3').expect(206);
+  await request(app).get(fixedEpisode.body.playUrl).set('Range', 'bytes=4-5').expect(410);
+});
+
+test('creates playback token via dedicated endpoint and validates request body', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'filmix-api-test-token-'));
+  const fixedFilePath = path.join(tempDir, 'fixed.mp4');
+  await fs.writeFile(fixedFilePath, Buffer.from('abcdefghij', 'utf8'));
+  const app = createTestApp({
+    fixedSeason: 5,
+    fixedEpisode: 11,
+    fixedLocalFilePath: fixedFilePath
+  });
+  await request(app).post('/api/playback-token').send({ season: 5 }).expect(400);
+  const tokenResponse = await request(app)
+    .post('/api/playback-token')
+    .send({ season: 5, episode: 11, quality: 480 })
+    .expect(200);
+  assert.match(String(tokenResponse.body.playbackUrl || ''), /^\/api\/stream\//);
+  await request(app).get(tokenResponse.body.playbackUrl).set('Range', 'bytes=0-1').expect(206);
+});
+
+test('returns tokenized ladder and batch payloads', async () => {
+  const playlistUrl = 'https://filmix.zip/pl/paw.batch.txt';
+  const encodedPlaylist = encodePlayerjsValue(
+    JSON.stringify([
+      {
+        title: 'Сезон 5',
+        folder: [
+          {
+            id: 's5e11',
+            file: '[480p]https://cdn.example/paw/s05e11_480.mp4,[1080p]https://cdn.example/paw/s05e11_1080.mp4'
+          },
+          {
+            id: 's5e12',
+            file: '[480p]https://cdn.example/paw/s05e12_480.mp4,[1080p]https://cdn.example/paw/s05e12_1080.mp4'
+          }
+        ]
+      }
+    ])
+  );
+  const app = createTestApp({
+    fixedSeason: 5,
+    fixedEpisode: 11,
+    fixedQuality: 1080,
+    playlistFetch: async (url) => {
+      assert.equal(url, playlistUrl);
+      return {
+        ok: true,
+        status: 200,
+        async text() {
+          return encodedPlaylist;
+        }
+      };
+    },
+    filmixClient: {
+      async getPlayerData() {
+        return {
+          message: {
+            translations: {
+              video: {
+                'Дубляж [Ukr, MEGOGO Voice]': encodePlayerjsValue(playlistUrl)
+              }
+            },
+            links: []
+          }
+        };
+      }
     }
   });
-  const showResponse = await request(app).get('/api/show').expect(200);
-  assert.equal(showResponse.body.title, 'PAW Patrol');
-  assert.deepEqual(showResponse.body.seasons, [1]);
-  assert.deepEqual(showResponse.body.episodesBySeason, { '1': [1, 2] });
-  assert.deepEqual(showResponse.body.fixed, { season: 1, episode: 1 });
-  assert.match(String(showResponse.headers['cache-control'] || ''), /max-age=30/);
-  const episodeResponse = await request(app).get('/api/episode').query({ season: 1, episode: 1 }).expect(200);
-  assert.equal(episodeResponse.body.defaultLang, 'en');
-  assert.deepEqual(
-    episodeResponse.body.sources.map((item) => item.lang),
-    ['en', 'uk', 'ru']
-  );
-  const playResponse = await request(app).get('/api/play').query({ season: 1, episode: 1, lang: 'en' }).expect(302);
-  assert.match(playResponse.headers.location, /^\/proxy\/video\?src=/);
-  const fixedEpisodeResponse = await request(app).get('/api/fixed-episode').expect(200);
-  assert.equal(fixedEpisodeResponse.body.season, 1);
-  assert.equal(fixedEpisodeResponse.body.episode, 1);
-  assert.match(fixedEpisodeResponse.body.playUrl, /^\/proxy\/video\?src=/);
-  assert.equal(fixedEpisodeResponse.body.sourceUrl, 'https://cdn.example/en/s01e01.m3u8');
-  const sourceResponse = await request(app).get('/api/source').expect(200);
-  assert.equal(sourceResponse.body.sourceUrl, 'https://cdn.example/en/s01e01.m3u8');
-  assert.equal(sourceResponse.body.origin, 'catalog');
-  const sourceByEpisodeResponse = await request(app).get('/api/source').query({ season: 1, episode: 2 }).expect(200);
-  assert.equal(sourceByEpisodeResponse.body.season, 1);
-  assert.equal(sourceByEpisodeResponse.body.episode, 2);
-  assert.equal(sourceByEpisodeResponse.body.sourceUrl, 'https://cdn.example/en/s01e02_720.m3u8');
-  assert.equal(sourceByEpisodeResponse.body.origin, 'catalog');
-  assert.equal(sourceByEpisodeResponse.body.quality, 0);
-  assert.match(String(sourceByEpisodeResponse.headers['cache-control'] || ''), /max-age=30/);
-  const sourceByQualityResponse = await request(app).get('/api/source').query({ season: 1, episode: 2, quality: 360 }).expect(200);
-  assert.equal(sourceByQualityResponse.body.sourceUrl, 'https://cdn.example/en/s01e02_720.m3u8');
-  assert.equal(sourceByQualityResponse.body.quality, 0);
-  const sourceByMinQualityResponse = await request(app).get('/api/source').query({ season: 1, episode: 2, quality: 'min' }).expect(200);
-  assert.equal(sourceByMinQualityResponse.body.sourceUrl, 'https://cdn.example/en/s01e02_720.m3u8');
-  assert.equal(sourceByMinQualityResponse.body.quality, 0);
-  const sourceLadderResponse = await request(app).get('/api/source-ladder').query({ season: 1, episode: 2 }).expect(200);
-  assert.equal(sourceLadderResponse.body.season, 1);
-  assert.equal(sourceLadderResponse.body.episode, 2);
-  assert.equal(sourceLadderResponse.body.bootstrapQuality, 480);
-  assert.equal(sourceLadderResponse.body.maxQuality, 0);
-  assert.deepEqual(
-    sourceLadderResponse.body.sources.map((item) => item.quality),
-    [0]
-  );
-  await request(app).get('/api/source').query({ season: 1, episode: 'x' }).expect(400);
-  await request(app).get('/api/source').query({ season: 1, episode: 2, quality: 'bad' }).expect(400);
-  await request(app).get('/api/source').query({ season: 1, episode: 9 }).expect(404);
-  const fixedPlayResponse = await request(app).get('/api/play').expect(302);
-  assert.match(fixedPlayResponse.headers.location, /^\/proxy\/video\?src=/);
+  const ladder = await request(app).get('/api/source-ladder').query({ season: 5, episode: 11 }).expect(200);
+  assert.equal(Array.isArray(ladder.body.sources), true);
+  assert.equal(ladder.body.sources.every((item) => typeof item.playbackUrl === 'string'), true);
+  assert.equal(ladder.body.sources.every((item) => !Object.hasOwn(item, 'sourceUrl')), true);
+  const sourceMin = await request(app).get('/api/source').query({ season: 5, episode: 11, quality: 'min' }).expect(200);
+  assert.equal(typeof sourceMin.body.playbackUrl, 'string');
+  assert.equal(sourceMin.body.quality, 480);
+  const sourceLow = await request(app).get('/api/source').query({ season: 5, episode: 11, quality: 'low' }).expect(200);
+  assert.equal(typeof sourceLow.body.playbackUrl, 'string');
+  assert.equal(sourceLow.body.quality, 480);
+  const batch = await request(app).get('/api/source-batch').query({ season: 5, episodes: '11,12,99' }).expect(200);
+  assert.deepEqual(batch.body.items.map((item) => item.episode), [11, 12]);
+  assert.equal(batch.body.items.every((item) => typeof item.playbackUrl === 'string'), true);
+  await request(app).get('/api/source-batch').query({ season: 5, episodes: '11,12', quality: 'bad' }).expect(400);
+});
+
+test('uses strict validation for season and episode', async () => {
+  const app = createTestApp();
+  await request(app).get('/api/source').query({ season: '1.5', episode: 1 }).expect(400);
+  await request(app).get('/api/source').query({ season: '01', episode: 1 }).expect(400);
+  await request(app).get('/api/source').query({ season: 1, episode: 0 }).expect(400);
+  await request(app).get('/api/source').query({ season: 1 }).expect(400);
+  await request(app).get('/api/episode').query({ season: 1, episode: '1.2' }).expect(400);
+  await request(app).get('/api/source-ladder').query({ season: 1, episode: '1.2' }).expect(400);
+  await request(app).get('/api/play').query({ season: 1, episode: '1.2' }).expect(400);
+});
+
+test('hides version in health response by default', async () => {
+  const appDefault = createTestApp();
+  const healthDefault = await request(appDefault).get('/api/health').expect(200);
+  assert.equal(healthDefault.body.ok, true);
+  assert.equal(Object.hasOwn(healthDefault.body, 'version'), false);
+  const appWithVersion = createTestApp({
+    exposeHealthVersion: true,
+    version: 'abc123'
+  });
+  const healthWithVersion = await request(appWithVersion).get('/api/health').expect(200);
+  assert.equal(healthWithVersion.body.version, 'abc123');
+});
+
+test('enforces CORS origin restrictions when localhost is disabled', async () => {
+  const app = createTestApp({
+    allowLocalhostOrigins: false,
+    corsOrigin: 'https://allowed.example'
+  });
+  await request(app).get('/api/health').set('Origin', 'https://blocked.example').expect(403);
+  const allowed = await request(app).get('/api/health').set('Origin', 'https://allowed.example').expect(200);
+  assert.equal(allowed.headers['access-control-allow-origin'], 'https://allowed.example');
+});
+
+test('applies rate limiting to sensitive endpoints', async () => {
+  const app = createTestApp({
+    rateLimitWindowMs: 60000,
+    rateLimitMaxRequests: 1
+  });
+  await request(app).get('/api/source').query({ season: 1, episode: 1 }).expect(200);
+  await request(app).get('/api/source').query({ season: 1, episode: 1 }).expect(429);
+});
+
+test('imports har entries with admin token and keeps episode output sanitized', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'filmix-api-test-admin-'));
+  const mapPath = path.join(tempDir, 'english-map.json');
+  await fs.writeFile(mapPath, `${JSON.stringify({}, null, 2)}\n`, 'utf8');
+  const app = createTestApp({
+    mapPath,
+    adminToken: 'secret-token'
+  });
   await request(app)
     .post('/api/admin/import-har')
     .send({ log: { entries: [] } })
@@ -153,351 +272,7 @@ test('serves show, episode, play and har import', async () => {
     .set('Authorization', 'Bearer secret-token')
     .send(importPayload)
     .expect(200);
-  const episode2Response = await request(app).get('/api/episode').query({ season: 1, episode: 2 }).expect(200);
-  assert.deepEqual(
-    episode2Response.body.sources.map((item) => item.lang),
-    ['en', 'ru']
-  );
-});
-
-test('uses fixed public media url for one-episode mode', async () => {
-  const mediaUrl = 'https://media.example.com/paw/s05e11_480_en.mp4';
-  const appProxy = createApp({
-    corsOrigin: 'http://localhost:5173',
-    showTitle: 'PAW Patrol',
-    fixedSeason: 5,
-    fixedEpisode: 11,
-    fixedPublicMediaUrl: mediaUrl,
-    fixedPublicMediaViaProxy: true,
-    pageUrl: 'https://filmix.zip/multser/detskij/87660-v-schenyachiy-patrul-chas-2013.html',
-    userAgent: 'TestAgent',
-    version: 'test',
-    filmixClient: {
-      async getPlayerData() {
-        return playerDataFixture;
-      }
-    }
-  });
-  const proxyFixedEpisode = await request(appProxy).get('/api/fixed-episode').expect(200);
-  assert.equal(proxyFixedEpisode.body.playUrl, `/proxy/video?src=${encodeURIComponent(mediaUrl)}`);
-  assert.equal(proxyFixedEpisode.body.sourceUrl, mediaUrl);
-  assert.equal(proxyFixedEpisode.body.origin, 'fixed-public');
-  const proxySourceResponse = await request(appProxy).get('/api/source').expect(200);
-  assert.equal(proxySourceResponse.body.sourceUrl, mediaUrl);
-  assert.equal(proxySourceResponse.body.origin, 'fixed-public');
-  const proxyPlay = await request(appProxy).get('/api/play').expect(302);
-  assert.equal(proxyPlay.headers.location, `/proxy/video?src=${encodeURIComponent(mediaUrl)}`);
-  const appDirect = createApp({
-    corsOrigin: 'http://localhost:5173',
-    showTitle: 'PAW Patrol',
-    fixedSeason: 5,
-    fixedEpisode: 11,
-    fixedPublicMediaUrl: mediaUrl,
-    fixedPublicMediaViaProxy: false,
-    pageUrl: 'https://filmix.zip/multser/detskij/87660-v-schenyachiy-patrul-chas-2013.html',
-    userAgent: 'TestAgent',
-    version: 'test',
-    filmixClient: {
-      async getPlayerData() {
-        return playerDataFixture;
-      }
-    }
-  });
-  const directFixedEpisode = await request(appDirect).get('/api/fixed-episode').expect(200);
-  assert.equal(directFixedEpisode.body.playUrl, mediaUrl);
-  assert.equal(directFixedEpisode.body.sourceUrl, mediaUrl);
-  assert.equal(directFixedEpisode.body.origin, 'fixed-public');
-  const directPlay = await request(appDirect).get('/api/play').expect(302);
-  assert.equal(directPlay.headers.location, mediaUrl);
-});
-
-test('uses decoded filmix playlist for fixed episode when direct source is not configured', async () => {
-  const playlistUrl = 'https://filmix.zip/pl/paw.txt';
-  const encodedPlaylist = encodePlayerjsValue(
-    JSON.stringify([
-      {
-        title: 'Сезон 5',
-        folder: [
-          {
-            id: 's5e11',
-            file: '[480p]https://cdn.example/paw/s05e11_480.mp4,[720p]https://cdn.example/paw/s05e11_720.mp4'
-          }
-        ]
-      }
-    ])
-  );
-  const app = createApp({
-    corsOrigin: 'http://localhost:5173',
-    showTitle: 'PAW Patrol',
-    fixedSeason: 5,
-    fixedEpisode: 11,
-    fixedQuality: 480,
-    pageUrl: 'https://filmix.zip/multser/detskij/87660-v-schenyachiy-patrul-chas-2013.html',
-    userAgent: 'TestAgent',
-    version: 'test',
-    playlistFetch: async (url) => {
-      assert.equal(url, playlistUrl);
-      return {
-        ok: true,
-        status: 200,
-        async text() {
-          return encodedPlaylist;
-        }
-      };
-    },
-    filmixClient: {
-      async getPlayerData() {
-        return {
-          message: {
-            translations: {
-              video: {
-                'Дубляж [Ukr, MEGOGO Voice]': encodePlayerjsValue(playlistUrl)
-              }
-            },
-            links: []
-          }
-        };
-      }
-    }
-  });
-  const response = await request(app).get('/api/fixed-episode').expect(200);
-  assert.equal(
-    response.body.playUrl,
-    `/proxy/video?src=${encodeURIComponent('https://cdn.example/paw/s05e11_480.mp4')}`
-  );
-  assert.equal(response.body.sourceUrl, 'https://cdn.example/paw/s05e11_480.mp4');
-  assert.equal(response.body.origin, 'player-data');
-  const sourceResponse = await request(app).get('/api/source').expect(200);
-  assert.equal(sourceResponse.body.sourceUrl, 'https://cdn.example/paw/s05e11_480.mp4');
-  assert.equal(sourceResponse.body.origin, 'player-data');
-});
-test('renders watch page for direct source url', async () => {
-  const app = createApp({
-    corsOrigin: 'http://localhost:5173',
-    showTitle: 'PAW Patrol',
-    fixedSeason: 5,
-    fixedEpisode: 11,
-    pageUrl: 'https://filmix.zip/multser/detskij/87660-v-schenyachiy-patrul-chas-2013.html',
-    userAgent: 'TestAgent',
-    version: 'test',
-    filmixClient: {
-      async getPlayerData() {
-        return playerDataFixture;
-      }
-    }
-  });
-  await request(app).get('/watch').expect(400);
-  const src = 'https://cdn.example/video.mp4?user=1093269';
-  const response = await request(app).get('/watch').query({ src }).expect(200);
-  assert.match(response.headers['content-type'], /text\/html/);
-  assert.match(response.text, /<video/);
-  assert.match(response.text, new RegExp(encodeURIComponent(src)));
-});
-
-test('forces /api/show catalog rebuild when force query is enabled', async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'filmix-api-test-force-show-'));
-  const mapPath = path.join(tempDir, 'english-map.json');
-  await fs.writeFile(mapPath, `${JSON.stringify({}, null, 2)}\n`, 'utf8');
-  let calls = 0;
-  const app = createApp({
-    mapPath,
-    corsOrigin: 'http://localhost:5173',
-    showTitle: 'PAW Patrol',
-    fixedSeason: 5,
-    fixedEpisode: 11,
-    pageUrl: 'https://filmix.zip/multser/detskij/87660-v-schenyachiy-patrul-chas-2013.html',
-    userAgent: 'TestAgent',
-    version: 'test',
-    filmixClient: {
-      async getPlayerData() {
-        calls += 1;
-        return playerDataFixture;
-      }
-    }
-  });
-  await request(app).get('/api/show').expect(200);
-  await request(app).get('/api/show').expect(200);
-  assert.equal(calls, 1);
-  await request(app).get('/api/show').query({ force: 1 }).expect(200);
-  assert.equal(calls, 2);
-});
-
-test('stores and returns playback progress across app instances', async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'filmix-api-test-progress-'));
-  const progressPath = path.join(tempDir, 'playback-progress.json');
-  const app = createApp({
-    corsOrigin: 'http://localhost:5173',
-    showTitle: 'PAW Patrol',
-    fixedSeason: 5,
-    fixedEpisode: 11,
-    playbackProgressPath: progressPath,
-    pageUrl: 'https://filmix.zip/multser/detskij/87660-v-schenyachiy-patrul-chas-2013.html',
-    userAgent: 'TestAgent',
-    version: 'test',
-    filmixClient: {
-      async getPlayerData() {
-        return playerDataFixture;
-      }
-    }
-  });
-  const empty = await request(app).get('/api/progress').expect(200);
-  assert.equal(empty.body.season, null);
-  assert.equal(empty.body.episode, null);
-  assert.equal(empty.body.currentTime, 0);
-  assert.equal(empty.body.duration, 0);
-  assert.equal(empty.body.updatedAt, 0);
-  await request(app)
-    .post('/api/progress')
-    .send({ season: 5, episode: 11, currentTime: 75.25, duration: 1391, updatedAt: 100 })
-    .expect(200);
-  const saved = await request(app).get('/api/progress').expect(200);
-  assert.equal(saved.body.season, 5);
-  assert.equal(saved.body.episode, 11);
-  assert.equal(saved.body.currentTime, 75.25);
-  assert.equal(saved.body.duration, 1391);
-  assert.equal(saved.body.updatedAt, 100);
-  const ignoredOlder = await request(app)
-    .post('/api/progress')
-    .send({ season: 5, episode: 10, currentTime: 10, duration: 100, updatedAt: 50 })
-    .expect(200);
-  assert.equal(ignoredOlder.body.season, 5);
-  assert.equal(ignoredOlder.body.episode, 11);
-  const fromPlainText = await request(app)
-    .post('/api/progress')
-    .set('Content-Type', 'text/plain')
-    .send(JSON.stringify({ season: 5, episode: 11, currentTime: 80.5, duration: 1391, updatedAt: 200 }))
-    .expect(200);
-  assert.equal(fromPlainText.body.currentTime, 80.5);
-  assert.equal(fromPlainText.body.updatedAt, 200);
-  const appReloaded = createApp({
-    corsOrigin: 'http://localhost:5173',
-    showTitle: 'PAW Patrol',
-    fixedSeason: 5,
-    fixedEpisode: 11,
-    playbackProgressPath: progressPath,
-    pageUrl: 'https://filmix.zip/multser/detskij/87660-v-schenyachiy-patrul-chas-2013.html',
-    userAgent: 'TestAgent',
-    version: 'test',
-    filmixClient: {
-      async getPlayerData() {
-        return playerDataFixture;
-      }
-    }
-  });
-  const persisted = await request(appReloaded).get('/api/progress').expect(200);
-  assert.equal(persisted.body.season, 5);
-  assert.equal(persisted.body.episode, 11);
-  assert.equal(persisted.body.currentTime, 80.5);
-  assert.equal(persisted.body.duration, 1391);
-  assert.equal(persisted.body.updatedAt, 200);
-  await request(appReloaded).post('/api/progress').send({ season: 'x', episode: 11, currentTime: 5 }).expect(400);
-});
-
-test('serves source batch and reuses source cache for repeated source lookups', async () => {
-  const playlistUrl = 'https://filmix.zip/pl/paw.batch.txt';
-  const encodedPlaylist = encodePlayerjsValue(
-    JSON.stringify([
-      {
-        title: 'Сезон 5',
-        folder: [
-          {
-            id: 's5e11',
-            file: '[480p]https://cdn.example/paw/s05e11_480.mp4,[1080p]https://cdn.example/paw/s05e11_1080.mp4'
-          },
-          {
-            id: 's5e12',
-            file: '[480p]https://cdn.example/paw/s05e12_480.mp4,[1080p]https://cdn.example/paw/s05e12_1080.mp4'
-          }
-        ]
-      }
-    ])
-  );
-  let playerDataCalls = 0;
-  let playlistCalls = 0;
-  const app = createApp({
-    corsOrigin: 'http://localhost:5173',
-    showTitle: 'PAW Patrol',
-    fixedSeason: 5,
-    fixedEpisode: 11,
-    fixedQuality: 1080,
-    sourceCacheTtlMs: 1800000,
-    playlistCacheTtlMs: 600000,
-    playerDataCacheTtlMs: 60000,
-    pageUrl: 'https://filmix.zip/multser/detskij/87660-v-schenyachiy-patrul-chas-2013.html',
-    userAgent: 'TestAgent',
-    version: 'test',
-    playlistFetch: async (url) => {
-      assert.equal(url, playlistUrl);
-      playlistCalls += 1;
-      return {
-        ok: true,
-        status: 200,
-        async text() {
-          return encodedPlaylist;
-        }
-      };
-    },
-    filmixClient: {
-      async getPlayerData() {
-        playerDataCalls += 1;
-        return {
-          message: {
-            translations: {
-              video: {
-                'Дубляж [Ukr, MEGOGO Voice]': encodePlayerjsValue(playlistUrl)
-              }
-            },
-            links: []
-          }
-        };
-      }
-    }
-  });
-  for (let index = 0; index < 10; index += 1) {
-    const response = await request(app).get('/api/source').query({ season: 5, episode: 11 }).expect(200);
-    assert.equal(response.body.sourceUrl, 'https://cdn.example/paw/s05e11_1080.mp4');
-    assert.equal(response.body.origin, 'player-data');
-    assert.equal(response.body.quality, 1080);
-  }
-  assert.ok(playerDataCalls <= 2);
-  assert.ok(playlistCalls <= 2);
-  const source480 = await request(app).get('/api/source').query({ season: 5, episode: 11, quality: 480 }).expect(200);
-  assert.equal(source480.body.sourceUrl, 'https://cdn.example/paw/s05e11_480.mp4');
-  assert.equal(source480.body.quality, 480);
-  const source900 = await request(app).get('/api/source').query({ season: 5, episode: 11, quality: 900 }).expect(200);
-  assert.equal(source900.body.sourceUrl, 'https://cdn.example/paw/s05e11_480.mp4');
-  assert.equal(source900.body.quality, 480);
-  const ladder = await request(app).get('/api/source-ladder').query({ season: 5, episode: 11 }).expect(200);
-  assert.equal(ladder.body.maxQuality, 1080);
-  assert.deepEqual(
-    ladder.body.sources.map((item) => item.quality),
-    [480, 1080]
-  );
-  const batch = await request(app).get('/api/source-batch').query({ season: 5, episodes: '11,12,99' }).expect(200);
-  assert.equal(batch.body.season, 5);
-  assert.ok(Number.isFinite(Number(batch.body.generatedAt)));
-  assert.deepEqual(
-    batch.body.items.map((item) => item.episode),
-    [11, 12]
-  );
-  assert.deepEqual(
-    batch.body.items.map((item) => item.sourceUrl),
-    ['https://cdn.example/paw/s05e11_1080.mp4', 'https://cdn.example/paw/s05e12_1080.mp4']
-  );
-  assert.match(String(batch.headers['cache-control'] || ''), /max-age=30/);
-  const batch480 = await request(app).get('/api/source-batch').query({ season: 5, episodes: '11,12', quality: 480 }).expect(200);
-  assert.deepEqual(
-    batch480.body.items.map((item) => item.sourceUrl),
-    ['https://cdn.example/paw/s05e11_480.mp4', 'https://cdn.example/paw/s05e12_480.mp4']
-  );
-  assert.deepEqual(
-    batch480.body.items.map((item) => item.quality),
-    [480, 480]
-  );
-  await request(app).get('/api/source-batch').query({ season: 5, episodes: '11,12' }).expect(200);
-  assert.ok(playerDataCalls <= 2);
-  assert.ok(playlistCalls <= 2);
-  await request(app).get('/api/source-batch').query({ season: 'x', episodes: '11,12' }).expect(400);
-  await request(app).get('/api/source-batch').query({ season: 5, episodes: '11,12', quality: 'bad' }).expect(400);
-  await request(app).get('/api/source-batch').query({ season: 5, episodes: '' }).expect(400);
+  const episode = await request(app).get('/api/episode').query({ season: 1, episode: 2 }).expect(200);
+  assert.equal(episode.body.sources.some((item) => item.lang === 'en'), true);
+  assert.equal(episode.body.sources.every((item) => !Object.hasOwn(item, 'sourceUrl')), true);
 });

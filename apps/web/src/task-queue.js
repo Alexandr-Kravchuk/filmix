@@ -1,5 +1,4 @@
 import { remuxEnglishTrack, warmupFfmpeg } from './ffmpeg-engine.js';
-import { buildSourceCacheKey, readSourceUrl, writeSourceUrl, writeSourceUrls } from './source-cache.js';
 
 const DIAGNOSTIC_HISTORY_LIMIT = 40;
 const MAX_SOURCE_BYTES = 1024 * 1024 * 1024;
@@ -45,6 +44,13 @@ function parseQualityFromPayload(value, sourceUrl) {
   }
   return parseSourceQualityFromUrl(sourceUrl);
 }
+function parseExpiresAt(value, fallbackMs = 30000) {
+  const parsed = Number.parseInt(String(value || ''), 10);
+  if (Number.isFinite(parsed) && parsed > Date.now()) {
+    return parsed;
+  }
+  return Date.now() + fallbackMs;
+}
 function concatChunks(chunks, totalLength) {
   const merged = new Uint8Array(totalLength);
   let offset = 0;
@@ -61,8 +67,12 @@ export function buildEpisodeKey(season, episode) {
 export function buildTaskKey(season, episode, quality) {
   return `${season}:${episode}:${normalizeQualityRequest(quality)}`;
 }
-export function buildOutputCacheId(season, episode, sourceUrl) {
+export function buildOutputCacheId(season, episode, sourceUrl, sourceKey = '') {
   const episodeKey = buildEpisodeKey(season, episode);
+  const normalizedSourceKey = String(sourceKey || '').trim();
+  if (normalizedSourceKey) {
+    return `${episodeKey}:${normalizedSourceKey}`.toLowerCase();
+  }
   const normalizedSource = String(sourceUrl || '').trim();
   if (!normalizedSource) {
     return episodeKey;
@@ -87,11 +97,11 @@ export function createTaskQueue(options) {
   const prepared = new Map();
   const tasks = new Map();
   const diagnostics = [];
+  const sourceHints = new Map();
   const bootstrapQuality = normalizeQualityRequest(options.bootstrapQuality || 480);
   const enableOutputCache = options.enableOutputCache !== false;
   const releaseFfmpegAfterTask = options.releaseFfmpegAfterTask === true;
   const preferLowestQualityFromLadder = options.preferLowestQualityFromLadder === true;
-
   function pushDiagnostic(type, details = {}) {
     diagnostics.push({
       at: new Date().toISOString(),
@@ -108,25 +118,25 @@ export function createTaskQueue(options) {
   function getDiagnosticsSnapshot() {
     return diagnostics.slice();
   }
-  function getCacheKey(season, episode, sourceUrl) {
-    return `https://filmix-cache.local/en-track/${encodeURIComponent(buildOutputCacheId(season, episode, sourceUrl))}`;
+  function getCacheKey(season, episode, sourceUrl, sourceKey = '') {
+    return `https://filmix-cache.local/en-track/${encodeURIComponent(buildOutputCacheId(season, episode, sourceUrl, sourceKey))}`;
   }
   function resolveSourceUrl(value) {
     const sourceUrl = String(value || '').trim();
     if (!sourceUrl) {
-      throw new Error('Backend returned empty source URL');
+      throw new Error('Backend returned empty playback URL');
     }
     if (sourceUrl.startsWith('http://') || sourceUrl.startsWith('https://')) {
       return sourceUrl;
     }
     return new URL(sourceUrl, options.getApiBaseUrl()).toString();
   }
-  async function loadCachedOutput(season, episode, sourceUrl) {
+  async function loadCachedOutput(season, episode, sourceUrl, sourceKey = '') {
     if (!enableOutputCache || !('caches' in globalThis)) {
       return null;
     }
     const cache = await caches.open(OUTPUT_CACHE_NAME);
-    const response = await cache.match(getCacheKey(season, episode, sourceUrl));
+    const response = await cache.match(getCacheKey(season, episode, sourceUrl, sourceKey));
     if (!response) {
       return null;
     }
@@ -136,13 +146,13 @@ export function createTaskQueue(options) {
     }
     return blob;
   }
-  async function saveCachedOutput(season, episode, sourceUrl, blob) {
+  async function saveCachedOutput(season, episode, sourceUrl, sourceKey, blob) {
     if (!enableOutputCache || !('caches' in globalThis)) {
       return;
     }
     const cache = await caches.open(OUTPUT_CACHE_NAME);
     await cache.put(
-      getCacheKey(season, episode, sourceUrl),
+      getCacheKey(season, episode, sourceUrl, sourceKey),
       new Response(blob, {
         headers: {
           'Content-Type': 'video/mp4'
@@ -253,7 +263,7 @@ export function createTaskQueue(options) {
     );
     return new Blob([outputBytes], { type: 'video/mp4' });
   }
-  function upsertPreparedEntry(season, episode, qualityRequest, sourceUrl, quality, outputBlob) {
+  function upsertPreparedEntry(season, episode, qualityRequest, sourceUrl, quality, sourceKey, outputBlob) {
     const taskKey = buildTaskKey(season, episode, qualityRequest);
     const oldEntry = prepared.get(taskKey);
     if (oldEntry && oldEntry.blobUrl) {
@@ -268,11 +278,24 @@ export function createTaskQueue(options) {
       quality,
       qualityLabel: normalizeQualityLabel(quality || qualityRequest),
       sourceUrl,
+      sourceKey: String(sourceKey || ''),
       playUrl: blobUrl,
       blobUrl
     };
     prepared.set(taskKey, entry);
     return entry;
+  }
+  function parseSourcePayload(payload) {
+    const sourceUrl = resolveSourceUrl(payload && (payload.playbackUrl || payload.sourceUrl));
+    const quality = parseQualityFromPayload(payload && payload.quality, sourceUrl);
+    const sourceKey = String(payload && payload.sourceKey ? payload.sourceKey : '').trim();
+    const expiresAt = parseExpiresAt(payload && payload.expiresAt, 30000);
+    return {
+      sourceUrl,
+      quality,
+      sourceKey,
+      expiresAt
+    };
   }
   async function resolveLowestSourceFromLadder(season, episode) {
     if (typeof options.fetchSourceLadder !== 'function') {
@@ -282,16 +305,15 @@ export function createTaskQueue(options) {
     const sources = Array.isArray(payload && payload.sources) ? payload.sources : [];
     let best = null;
     for (const item of sources) {
-      if (!item || typeof item.sourceUrl !== 'string') {
+      if (!item || (typeof item.playbackUrl !== 'string' && typeof item.sourceUrl !== 'string')) {
         continue;
       }
-      const sourceUrl = resolveSourceUrl(item.sourceUrl);
-      const quality = parseQualityFromPayload(item.quality, sourceUrl);
-      if (!(quality > 0)) {
+      const parsed = parseSourcePayload(item);
+      if (!(parsed.quality > 0)) {
         continue;
       }
-      if (!best || quality < best.quality) {
-        best = { sourceUrl, quality };
+      if (!best || parsed.quality < best.quality) {
+        best = parsed;
       }
     }
     if (best) {
@@ -306,22 +328,25 @@ export function createTaskQueue(options) {
   }
   async function resolveSourceForEpisode(season, episode, qualityRequest) {
     const normalizedQuality = normalizeQualityRequest(qualityRequest);
-    const sourceKey = buildSourceCacheKey(season, episode, normalizedQuality);
-    const cachedSource = readSourceUrl(sourceKey);
-    if (cachedSource) {
-      const sourceUrl = resolveSourceUrl(cachedSource);
+    const key = buildTaskKey(season, episode, normalizedQuality);
+    const cached = sourceHints.get(key);
+    if (cached && cached.expiresAt > Date.now() + 2000) {
       return {
-        sourceUrl,
-        quality: parseSourceQualityFromUrl(sourceUrl)
+        sourceUrl: cached.sourceUrl,
+        quality: cached.quality,
+        sourceKey: cached.sourceKey
       };
     }
     if (preferLowestQualityFromLadder && normalizedQuality !== 'max') {
       try {
         const lowest = await resolveLowestSourceFromLadder(season, episode);
         if (lowest) {
-          writeSourceUrl(sourceKey, lowest.sourceUrl);
-          writeSourceUrl(buildSourceCacheKey(season, episode, lowest.quality), lowest.sourceUrl);
-          return lowest;
+          sourceHints.set(key, lowest);
+          return {
+            sourceUrl: lowest.sourceUrl,
+            quality: lowest.quality,
+            sourceKey: lowest.sourceKey
+          };
         }
       } catch (error) {
         pushDiagnostic('ladder_fetch_failed', {
@@ -332,13 +357,9 @@ export function createTaskQueue(options) {
       }
     }
     const payload = await options.fetchSourceByEpisode(season, episode, normalizedQuality);
-    const sourceUrl = resolveSourceUrl(payload.sourceUrl);
-    const quality = parseQualityFromPayload(payload.quality, sourceUrl);
-    writeSourceUrl(sourceKey, sourceUrl);
-    if (quality > 0) {
-      writeSourceUrl(buildSourceCacheKey(season, episode, quality), sourceUrl);
-    }
-    return { sourceUrl, quality };
+    const parsed = parseSourcePayload(payload);
+    sourceHints.set(key, parsed);
+    return parsed;
   }
   async function primeSourcesFromBatch(season, episodes, quality = 'max') {
     const normalizedEpisodes = Array.from(new Set((Array.isArray(episodes) ? episodes : [])
@@ -350,27 +371,15 @@ export function createTaskQueue(options) {
     const normalizedQuality = normalizeQualityRequest(quality);
     try {
       const payload = await options.fetchSourceBatch(season, normalizedEpisodes, normalizedQuality);
-      const entries = [];
       for (const item of Array.isArray(payload && payload.items) ? payload.items : []) {
         const episode = Number.parseInt(String(item.episode || ''), 10);
-        if (!Number.isFinite(episode) || episode <= 0 || typeof item.sourceUrl !== 'string') {
+        if (!Number.isFinite(episode) || episode <= 0) {
           continue;
         }
-        const sourceUrl = resolveSourceUrl(item.sourceUrl);
-        const resolvedQuality = parseQualityFromPayload(item.quality, sourceUrl);
-        entries.push({
-          episodeKey: buildSourceCacheKey(season, episode, normalizedQuality),
-          sourceUrl
-        });
-        if (resolvedQuality > 0) {
-          entries.push({
-            episodeKey: buildSourceCacheKey(season, episode, resolvedQuality),
-            sourceUrl
-          });
-        }
-      }
-      if (entries.length) {
-        writeSourceUrls(entries);
+        const parsed = parseSourcePayload(item);
+        const normalizedItemQuality = normalizeQualityRequest(parsed.quality || normalizedQuality);
+        sourceHints.set(buildTaskKey(season, episode, normalizedQuality), parsed);
+        sourceHints.set(buildTaskKey(season, episode, normalizedItemQuality), parsed);
       }
     } catch {
     }
@@ -415,7 +424,7 @@ export function createTaskQueue(options) {
         resolvedQuality: source.quality || 0,
         sourceUrl: source.sourceUrl
       });
-      let outputBlob = await loadCachedOutput(season, episode, source.sourceUrl);
+      let outputBlob = await loadCachedOutput(season, episode, source.sourceUrl, source.sourceKey);
       if (outputBlob) {
         setTaskProgress(0.98);
       } else {
@@ -425,7 +434,7 @@ export function createTaskQueue(options) {
             episode,
             requestedQuality: normalizedQuality
           });
-          await saveCachedOutput(season, episode, source.sourceUrl, outputBlob);
+          await saveCachedOutput(season, episode, source.sourceUrl, source.sourceKey, outputBlob);
         } catch (error) {
           pushDiagnostic('prepare_failed', {
             season,
@@ -437,38 +446,31 @@ export function createTaskQueue(options) {
             throw error;
           }
           const refreshedPayload = await options.fetchSourceByEpisode(season, episode, normalizedQuality);
-          const refreshedSourceUrl = resolveSourceUrl(refreshedPayload.sourceUrl);
-          if (refreshedSourceUrl === source.sourceUrl) {
+          const refreshedSource = parseSourcePayload(refreshedPayload);
+          if (refreshedSource.sourceUrl === source.sourceUrl && refreshedSource.sourceKey === source.sourceKey) {
             throw error;
           }
-          const refreshedQuality = parseQualityFromPayload(refreshedPayload.quality, refreshedSourceUrl);
-          source = {
-            sourceUrl: refreshedSourceUrl,
-            quality: refreshedQuality
-          };
+          source = refreshedSource;
+          sourceHints.set(buildTaskKey(season, episode, normalizedQuality), refreshedSource);
           task.quality = source.quality;
           if (source.quality > 0) {
             task.qualityLabel = normalizeQualityLabel(source.quality);
           }
-          writeSourceUrl(buildSourceCacheKey(season, episode, normalizedQuality), source.sourceUrl);
-          if (source.quality > 0) {
-            writeSourceUrl(buildSourceCacheKey(season, episode, source.quality), source.sourceUrl);
-          }
-          outputBlob = await loadCachedOutput(season, episode, source.sourceUrl);
+          outputBlob = await loadCachedOutput(season, episode, source.sourceUrl, source.sourceKey);
           if (!outputBlob) {
             outputBlob = await buildOutputBlob(source.sourceUrl, setTaskProgress, {
               season,
               episode,
               requestedQuality: normalizedQuality
             });
-            await saveCachedOutput(season, episode, source.sourceUrl, outputBlob);
+            await saveCachedOutput(season, episode, source.sourceUrl, source.sourceKey, outputBlob);
           } else {
             setTaskProgress(0.98);
           }
         }
       }
       setTaskProgress(1);
-      return upsertPreparedEntry(season, episode, normalizedQuality, source.sourceUrl, source.quality, outputBlob);
+      return upsertPreparedEntry(season, episode, normalizedQuality, source.sourceUrl, source.quality, source.sourceKey, outputBlob);
     })().finally(() => {
       tasks.delete(key);
     });

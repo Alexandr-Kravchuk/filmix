@@ -55,10 +55,6 @@ async function run() {
   const season = asInteger(args.season, 5);
   const episode = asInteger(args.episode, 11);
   const qualityRaw = String(args.quality || 'max').trim().toLowerCase();
-  const quality = asInteger(args.quality, Number.NaN);
-  const expectedPrefix = `s${String(season).padStart(2, '0')}e${String(episode).padStart(2, '0')}_`;
-  const expectedExactToken = Number.isFinite(quality) && quality > 0 ? `${expectedPrefix}${quality}.mp4` : '';
-  const expectedPattern = new RegExp(`${expectedPrefix}\\d+\\.mp4`);
   process.stdout.write(`Smoke API base: ${apiBase}\n`);
   const health = await requestJson(`${apiBase}/api/health`, {
     headers: {
@@ -68,7 +64,7 @@ async function run() {
   if (!health.response.ok || !health.data || health.data.ok !== true) {
     fail(`Health check failed: HTTP ${health.response.status} ${health.text}`);
   }
-  process.stdout.write(`Health check passed: version=${health.data.version}\n`);
+  process.stdout.write('Health check passed\n');
   const fixedEpisode = await requestJson(`${apiBase}/api/fixed-episode`, {
     headers: {
       Accept: 'application/json'
@@ -78,20 +74,11 @@ async function run() {
     fail(`Fixed episode failed: HTTP ${fixedEpisode.response.status} ${fixedEpisode.text}`);
   }
   const playUrl = String(fixedEpisode.data.playUrl || '');
-  if (!playUrl.startsWith('/proxy/video?src=')) {
+  if (!playUrl.startsWith('/api/stream/')) {
     fail(`Unexpected playUrl format: ${playUrl}`);
   }
   const resolvedUrl = new URL(playUrl, `${apiBase}/`);
-  const encodedSrc = resolvedUrl.searchParams.get('src') || '';
-  const sourceUrl = decodeURIComponent(encodedSrc);
-  const sourceMatches = expectedExactToken ? sourceUrl.includes(expectedExactToken) : expectedPattern.test(sourceUrl);
-  if (!sourceMatches) {
-    if (expectedExactToken) {
-      fail(`Source URL does not include expected episode token ${expectedExactToken}: ${sourceUrl}`);
-    }
-    fail(`Source URL does not match expected token pattern ${expectedPattern}: ${sourceUrl}`);
-  }
-  process.stdout.write(`Fixed episode source token check passed: ${qualityRaw}\n`);
+  process.stdout.write(`Fixed episode playback token check passed: ${qualityRaw}\n`);
   const sourceBatch = await requestJson(`${apiBase}/api/source-batch?season=${season}&episodes=${episode}`, {
     headers: {
       Accept: 'application/json'
@@ -101,13 +88,8 @@ async function run() {
     fail(`Source batch check failed: HTTP ${sourceBatch.response.status} ${sourceBatch.text}`);
   }
   const batchItem = sourceBatch.data.items.find((item) => Number.parseInt(String(item.episode || ''), 10) === episode);
-  const batchSourceUrl = batchItem && typeof batchItem.sourceUrl === 'string' ? batchItem.sourceUrl : '';
-  const batchMatches = expectedExactToken ? batchSourceUrl.includes(expectedExactToken) : expectedPattern.test(batchSourceUrl);
-  if (!batchItem || !batchMatches) {
-    if (expectedExactToken) {
-      fail(`Source batch does not include expected episode token ${expectedExactToken}`);
-    }
-    fail(`Source batch does not match expected token pattern ${expectedPattern}`);
+  if (!batchItem || typeof batchItem.playbackUrl !== 'string' || !batchItem.playbackUrl.startsWith('/api/stream/')) {
+    fail('Source batch does not include tokenized playback url');
   }
   process.stdout.write(`Source batch check passed: ${qualityRaw}\n`);
   const sourceLadder = await requestJson(`${apiBase}/api/source-ladder?season=${season}&episode=${episode}`, {
@@ -118,18 +100,9 @@ async function run() {
   if (!sourceLadder.response.ok || !sourceLadder.data || !Array.isArray(sourceLadder.data.sources)) {
     fail(`Source ladder check failed: HTTP ${sourceLadder.response.status} ${sourceLadder.text}`);
   }
-  const ladderMatch = sourceLadder.data.sources.some((item) => {
-    const source = String(item && item.sourceUrl ? item.sourceUrl : '');
-    if (expectedExactToken) {
-      return source.includes(expectedExactToken);
-    }
-    return expectedPattern.test(source);
-  });
+  const ladderMatch = sourceLadder.data.sources.some((item) => typeof item.playbackUrl === 'string' && item.playbackUrl.startsWith('/api/stream/'));
   if (!ladderMatch) {
-    if (expectedExactToken) {
-      fail(`Source ladder does not include expected episode token ${expectedExactToken}`);
-    }
-    fail(`Source ladder does not match expected token pattern ${expectedPattern}`);
+    fail('Source ladder does not include tokenized playback url');
   }
   process.stdout.write(`Source ladder check passed: ${qualityRaw}\n`);
   const proxyResponse = await fetch(resolvedUrl, {

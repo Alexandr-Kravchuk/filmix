@@ -5,7 +5,7 @@ This repository contains a static frontend for GitHub Pages and a separate Node.
 ## Architecture
 
 - `apps/web`: Vite + Vanilla JS frontend with season/episode picker and English playback only.
-- `apps/api`: Express API with Filmix auth, catalog extraction, video proxy, and HAR import.
+- `apps/api`: Express API with Filmix auth, catalog extraction, tokenized playback, and HAR import.
 - `apps/api/data/english-map.json`: English source mapping by `season:episode` keys.
 
 ## Requirements
@@ -39,14 +39,17 @@ Required values:
 - `FIXED_SEASON`
 - `FIXED_EPISODE`
 - `FIXED_QUALITY` (default `max`)
-- `MEDIA_CACHE_DIR` (default `/tmp/filmix-cache`)
-- `FFMPEG_BIN` (default `ffmpeg`)
-- `FFPROBE_BIN` (default `ffprobe`)
 - `FIXED_ENGLISH_SOURCE` (optional direct URL for one-episode mode)
 - `FIXED_LOCAL_FILE_PATH` (optional absolute path to local MP4; highest priority for fixed-episode mode)
 - `FIXED_PUBLIC_MEDIA_URL` (optional public S3/R2 URL for deploy mode)
-- `FIXED_PUBLIC_MEDIA_VIA_PROXY` (`true` or `false`, default `true`)
 - `PLAYBACK_PROGRESS_PATH` (default `/tmp/filmix-playback-progress.json`)
+- `PLAYBACK_TOKEN_SECRET` (required in production)
+- `PLAYBACK_TOKEN_TTL_SEC` (default `60`)
+- `PLAYBACK_TOKEN_MAX_USES` (default `256`)
+- `RATE_LIMIT_WINDOW_MS` (default `60000`)
+- `RATE_LIMIT_MAX_REQUESTS` (default `60`)
+- `EXPOSE_HEALTH_VERSION` (`false` in production by default)
+- `ALLOW_LOCALHOST_ORIGINS` (`false` in production by default)
 - `SOURCE_CACHE_TTL_MS` (default `1800000`)
 - `PLAYLIST_CACHE_TTL_MS` (default `600000`)
 - `PLAYER_DATA_CACHE_TTL_MS` (default `60000`)
@@ -87,7 +90,7 @@ npm --workspace apps/web run dev
 Open Vite URL, choose season and episode, then click `Play`.
 The app downloads the source MP4, remuxes it to a single English audio track, and starts playback from resulting `blob:` video.
 
-If source URL expires, export fresh `player-data` response (`text-*.txt` from Proxyman), load it with `Extract URL from player-data`, then run `Prepare English` again.
+If playback token expires, run `Prepare English` again to request a fresh tokenized stream URL.
 
 For weak devices you can enable minimal quality mode with the header button `Minimal quality mode`.
 
@@ -115,37 +118,36 @@ You can force mode from URL:
 - `GET /api/source-ladder?season=5&episode=11`
 - `GET /api/source-batch?season=5&episodes=11,12,13`
 - `POST /api/progress`
+- `POST /api/playback-token`
 - `GET /api/episode?season=1&episode=1`
 - `GET /api/play`
 - `GET /api/play?season=1&episode=1&lang=en`
-- `GET /proxy/video?src=<encoded_url>`
-- `GET /proxy/video-en?src=<encoded_url>`
-- `GET /watch?src=<encoded_url>`
+- `GET /api/stream/:token`
 - `POST /api/admin/import-har` with `Authorization: Bearer <ADMIN_TOKEN>`
 
 `/api/source` is a lightweight endpoint for GitHub Pages mode:
 
-- without query params returns fixed episode source
-- with `season` and `episode` returns source for selected episode
+- without query params returns fixed episode playback token
+- with `season` and `episode` returns playback token for selected episode
 - optional `quality` supports `max` or integer (`480`, `720`, `1080`)
 
-`/api/source-batch` returns source URLs for multiple episodes of one season:
+`/api/source-batch` returns playback tokens for multiple episodes of one season:
 
 - request: `season` + `episodes` CSV + optional `quality`
-- response: `{ season, items: [{ episode, sourceUrl, origin, quality }], generatedAt }`
+- response: `{ season, items: [{ episode, quality, origin, sourceKey, playbackToken, playbackUrl, expiresAt }], generatedAt }`
 
 `/api/source-ladder` returns quality variants for a single episode:
 
 - request: `season` + `episode`
-- response: `{ season, episode, bootstrapQuality, maxQuality, sources: [{ quality, sourceUrl, origin }], generatedAt }`
+- response: `{ season, episode, bootstrapQuality, maxQuality, sources: [{ quality, origin, sourceKey, playbackToken, playbackUrl, expiresAt }], generatedAt }`
 
-`/proxy/video-en` downloads source to local cache, remuxes to a single English audio track, then serves cached MP4 with `Range`.
+`/api/stream/:token` validates signed short-lived token and proxies/serves media stream with `Range`.
 
 `/api/progress` stores shared resume position (`season`, `episode`, `currentTime`, `duration`, `updatedAt`) so playback can continue from another device. The endpoint accepts both `application/json` and `text/plain` JSON body.
 
 Priority for fixed episode source:
 
-1. `FIXED_LOCAL_FILE_PATH` -> `/media/fixed-episode.mp4`
+1. `FIXED_LOCAL_FILE_PATH`
 2. `FIXED_PUBLIC_MEDIA_URL`
 3. `FIXED_ENGLISH_SOURCE`
 4. decoded Filmix `translations.video` (`#2`) -> playlist `.txt` -> episode `/s/.../sXXeYY_<quality>.mp4`
@@ -153,11 +155,6 @@ Priority for fixed episode source:
 
 For real Filmix source mode, keep `FIXED_LOCAL_FILE_PATH`, `FIXED_PUBLIC_MEDIA_URL`, and `FIXED_ENGLISH_SOURCE` empty.
 If API login does not return valid cookies, set `FILMIX_COOKIE` from browser request header for `POST /api/movies/player-data`.
-
-If `FIXED_PUBLIC_MEDIA_URL` is used:
-
-- `FIXED_PUBLIC_MEDIA_VIA_PROXY=true` -> frontend uses `/proxy/video?src=...` (no bucket CORS setup needed)
-- `FIXED_PUBLIC_MEDIA_VIA_PROXY=false` -> frontend uses direct media URL (bucket/domain CORS must allow GitHub Pages origin)
 
 ## HAR import
 
@@ -249,6 +246,13 @@ The Vite `base` path is auto-set to `/<repo>/` in GitHub Actions.
   - `FIXED_EPISODE=11`
   - `FIXED_QUALITY=max`
   - `CORS_ORIGIN=https://<github-user>.github.io`
+  - `PLAYBACK_TOKEN_SECRET=<strong-random-secret>`
+  - `PLAYBACK_TOKEN_TTL_SEC=60`
+  - `PLAYBACK_TOKEN_MAX_USES=256`
+  - `RATE_LIMIT_WINDOW_MS=60000`
+  - `RATE_LIMIT_MAX_REQUESTS=60`
+  - `EXPOSE_HEALTH_VERSION=false`
+  - `ALLOW_LOCALHOST_ORIGINS=false`
 - Keep empty in production:
   - `FIXED_LOCAL_FILE_PATH=`
   - `FIXED_ENGLISH_SOURCE=`
@@ -261,6 +265,7 @@ The Vite `base` path is auto-set to `/<repo>/` in GitHub Actions.
 ```bash
 curl https://<render-domain>/api/health
 curl https://<render-domain>/api/fixed-episode
+curl "https://<render-domain>/api/source?season=5&episode=11"
 ```
 
 2. Set GitHub repository variable:
