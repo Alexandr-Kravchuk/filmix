@@ -229,7 +229,11 @@ test('enforces CORS origin restrictions when localhost is disabled', async () =>
 });
 
 test('applies rate limiting to sensitive endpoints', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'filmix-api-test-rate-limit-'));
+  const mapPath = path.join(tempDir, 'english-map.json');
+  await fs.writeFile(mapPath, `${JSON.stringify({ '1:1': 'https://cdn.example/en/s01e01.m3u8' }, null, 2)}\n`, 'utf8');
   const app = createTestApp({
+    mapPath,
     rateLimitWindowMs: 60000,
     rateLimitMaxRequests: 1
   });
