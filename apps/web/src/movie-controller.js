@@ -1,4 +1,4 @@
-import { remuxEnglishTrack, segmentEnglishTrack, getFfmpegLogTail, getFfmpegLastError } from './ffmpeg-engine.js';
+import { remuxEnglishTrack, segmentEnglishTrackFromBlob, getFfmpegLogTail, getFfmpegLastError } from './ffmpeg-engine.js';
 import { createMovieLogUploader } from './movie-log-uploader.js';
 
 const XBOX_SEGMENT_SECONDS = 1200;
@@ -43,6 +43,50 @@ function concatChunks(chunks, totalLength) {
     offset += chunk.length;
   }
   return merged;
+}
+async function downloadSourceAsBlob(url, onProgress) {
+  const response = await fetch(url);
+  if (!response.ok || !response.body) {
+    throw new Error(`Movie download failed: HTTP ${response.status}`);
+  }
+  const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+  if (contentType && !contentType.includes('video/') && !contentType.includes('application/octet-stream')) {
+    throw new Error(`Movie source URL is invalid or expired: expected video, got ${contentType}`);
+  }
+  const total = Number.parseInt(response.headers.get('content-length') || '0', 10);
+  if (Number.isFinite(total) && total > MAX_SOURCE_BYTES) {
+    const sizeMb = Math.round(total / (1024 * 1024));
+    throw new Error(`Movie source is too large (${sizeMb}MB) for in-browser processing`);
+  }
+  const reader = response.body.getReader();
+  const blobs = [];
+  let received = 0;
+  let chunkCount = 0;
+  while (true) {
+    const step = await reader.read();
+    if (step.done) {
+      break;
+    }
+    const value = step.value;
+    if (!value) {
+      continue;
+    }
+    blobs.push(new Blob([value], { type: 'application/octet-stream' }));
+    received += value.length;
+    chunkCount += 1;
+    if (total > 0) {
+      onProgress(Math.min(0.99, received / total));
+    } else {
+      onProgress(Math.min(0.85, 0.08 + chunkCount * 0.03));
+    }
+    if (received > MAX_SOURCE_BYTES) {
+      throw new Error(`Movie source exceeded ${Math.round(MAX_SOURCE_BYTES / (1024 * 1024))}MB limit`);
+    }
+  }
+  if (received === 0) {
+    throw new Error('Movie source URL returned empty response body');
+  }
+  return new Blob(blobs, { type: contentType || 'video/mp4' });
 }
 async function downloadSource(url, onProgress) {
   const response = await fetch(url);
@@ -369,17 +413,34 @@ export function createMovieController(options) {
         const candidateLabel = candidates.length > 1 ? ` [${index + 1}/${candidates.length}]` : '';
         setStatus(`Downloading${translation}${qualityLabel}${candidateLabel}...`);
         const candidateUrl = resolvePlaybackUrl(candidate.playbackUrl, options.getApiBaseUrl());
-        pushDiagnostic('download:start', { candidateIndex: index, translation: candidate.translationName, quality: candidate.quality });
-        let sourceBytes;
+        pushDiagnostic('download:start', {
+          candidateIndex: index,
+          translation: candidate.translationName,
+          quality: candidate.quality,
+          mode: xboxSafeMode ? 'blob' : 'uint8'
+        });
+        let sourceBytes = null;
+        let sourceBlob = null;
         try {
-          sourceBytes = await downloadSource(candidateUrl, (progress) => {
-            if (requestId !== state.requestId) {
-              return;
-            }
-            options.setProgress(0.05 + progress * 0.5);
-            options.setProgressText(`${Math.round(progress * 100)}% downloading${candidateLabel}`);
-          });
-          pushDiagnostic('download:done', { candidateIndex: index, bytes: sourceBytes.length });
+          if (xboxSafeMode) {
+            sourceBlob = await downloadSourceAsBlob(candidateUrl, (progress) => {
+              if (requestId !== state.requestId) {
+                return;
+              }
+              options.setProgress(0.05 + progress * 0.5);
+              options.setProgressText(`${Math.round(progress * 100)}% downloading${candidateLabel}`);
+            });
+            pushDiagnostic('download:done', { candidateIndex: index, bytes: sourceBlob.size, mode: 'blob' });
+          } else {
+            sourceBytes = await downloadSource(candidateUrl, (progress) => {
+              if (requestId !== state.requestId) {
+                return;
+              }
+              options.setProgress(0.05 + progress * 0.5);
+              options.setProgressText(`${Math.round(progress * 100)}% downloading${candidateLabel}`);
+            });
+            pushDiagnostic('download:done', { candidateIndex: index, bytes: sourceBytes.length, mode: 'uint8' });
+          }
         } catch (downloadError) {
           pushDiagnostic('download:failed', { candidateIndex: index, name: downloadError && downloadError.name, message: downloadError && downloadError.message });
           lastError = downloadError;
@@ -392,9 +453,14 @@ export function createMovieController(options) {
         setStatus(`Extracting English audio track${translation}${candidateLabel}...`);
         try {
           if (xboxSafeMode) {
-            pushDiagnostic('ffmpeg:segment_start', { candidateIndex: index, segmentSeconds: XBOX_SEGMENT_SECONDS });
-            segmentResult = await segmentEnglishTrack(
-              sourceBytes,
+            pushDiagnostic('ffmpeg:segment_start', {
+              candidateIndex: index,
+              segmentSeconds: XBOX_SEGMENT_SECONDS,
+              source: 'workerfs',
+              blobBytes: sourceBlob ? sourceBlob.size : 0
+            });
+            segmentResult = await segmentEnglishTrackFromBlob(
+              sourceBlob,
               (progress) => {
                 if (requestId !== state.requestId) {
                   return;
@@ -404,10 +470,11 @@ export function createMovieController(options) {
               },
               { releaseAfter: true, segmentSeconds: XBOX_SEGMENT_SECONDS }
             );
+            sourceBlob = null;
             pushDiagnostic('ffmpeg:segment_done', {
               candidateIndex: index,
               segments: segmentResult.segments.length,
-              totalBytes: segmentResult.segments.reduce((sum, bytes) => sum + bytes.length, 0)
+              totalBytes: segmentResult.segments.reduce((sum, blob) => sum + blob.size, 0)
             });
           } else {
             pushDiagnostic('ffmpeg:remux_start', { candidateIndex: index });
@@ -449,7 +516,7 @@ export function createMovieController(options) {
       }
       const translationName = usedCandidate.translationName || '';
       if (segmentResult) {
-        state.segments = segmentResult.segments.map((bytes) => new Blob([bytes], { type: 'video/mp4' }));
+        state.segments = segmentResult.segments.map((entry) => entry instanceof Blob ? entry : new Blob([entry], { type: 'video/mp4' }));
         state.segmentSeconds = segmentResult.segmentSeconds;
         pushDiagnostic('segments:ready', {
           count: state.segments.length,

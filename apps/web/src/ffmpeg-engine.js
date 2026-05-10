@@ -1,6 +1,10 @@
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { toBlobURL } from '@ffmpeg/util';
 
+const INPUT_MOUNT_POINT = '/in';
+const INPUT_MOUNT_FILE = 'input.mp4';
+const FS_TYPE_WORKERFS = 'WORKERFS';
+
 const CORE_BASE_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm';
 
 const state = {
@@ -103,6 +107,27 @@ async function cleanupSegmentFiles(ffmpeg) {
   } catch {
   }
 }
+async function safeUnmountInput(ffmpeg) {
+  try {
+    await ffmpeg.unmount(INPUT_MOUNT_POINT);
+  } catch {
+  }
+}
+async function safeMountInputBlob(ffmpeg, blob) {
+  try {
+    await ffmpeg.unmount(INPUT_MOUNT_POINT);
+  } catch {
+  }
+  try {
+    await ffmpeg.createDir(INPUT_MOUNT_POINT);
+  } catch {
+  }
+  await ffmpeg.mount(
+    FS_TYPE_WORKERFS,
+    { blobs: [{ name: INPUT_MOUNT_FILE, data: blob }] },
+    INPUT_MOUNT_POINT
+  );
+}
 function resetFfmpegState(ffmpeg) {
   if (state.ffmpeg !== ffmpeg) {
     return;
@@ -130,6 +155,78 @@ export function warmupFfmpeg() {
   return enqueue(async () => {
     await ensureLoaded();
     return true;
+  });
+}
+export function segmentEnglishTrackFromBlob(sourceBlob, onProgress, options = {}) {
+  const releaseAfter = options && options.releaseAfter === true;
+  const segmentSeconds = Number.isFinite(Number(options && options.segmentSeconds)) && Number(options.segmentSeconds) > 0
+    ? Math.floor(Number(options.segmentSeconds))
+    : 1200;
+  return enqueue(async () => {
+    const ffmpeg = await ensureLoaded(onProgress);
+    state.lastError = '';
+    state.activeProgress = onProgress ? (value) => onProgress(0.2 + value * 0.78) : null;
+    let mounted = false;
+    try {
+      await cleanupSegmentFiles(ffmpeg);
+      await safeMountInputBlob(ffmpeg, sourceBlob);
+      mounted = true;
+      const inputPath = `${INPUT_MOUNT_POINT}/${INPUT_MOUNT_FILE}`;
+      const code = await ffmpeg.exec([
+        '-y',
+        '-i',
+        inputPath,
+        '-map',
+        '0:v:0',
+        '-map',
+        '0:a:m:language:eng',
+        '-c',
+        'copy',
+        '-f',
+        'segment',
+        '-segment_time',
+        String(segmentSeconds),
+        '-reset_timestamps',
+        '1',
+        '-movflags',
+        '+faststart',
+        'seg_%03d.mp4'
+      ]);
+      if (code !== 0) {
+        const details = state.lastError || state.logTail.join(' | ') || `ffmpeg exit code ${code}`;
+        throw new Error(`English track is not available in this source. ${details}`);
+      }
+      const entries = await ffmpeg.listDir('/');
+      const segmentNames = entries
+        .filter((entry) => entry && !entry.isDir && /^seg_\d+\.mp4$/.test(String(entry.name || '')))
+        .map((entry) => entry.name)
+        .sort();
+      if (!segmentNames.length) {
+        throw new Error('English track segmenting produced no output files');
+      }
+      const segments = [];
+      for (const name of segmentNames) {
+        const data = await ffmpeg.readFile(name);
+        segments.push(new Blob([data], { type: 'video/mp4' }));
+        try {
+          await ffmpeg.deleteFile(name);
+        } catch {
+        }
+      }
+      return {
+        segments,
+        segmentSeconds
+      };
+    } finally {
+      if (mounted) {
+        await safeUnmountInput(ffmpeg);
+      }
+      state.activeProgress = null;
+      await cleanupSegmentFiles(ffmpeg);
+      if (releaseAfter) {
+        resetFfmpegState(ffmpeg);
+      }
+    }
   });
 }
 export function segmentEnglishTrack(sourceBytes, onProgress, options = {}) {
@@ -179,7 +276,7 @@ export function segmentEnglishTrack(sourceBytes, onProgress, options = {}) {
       const segments = [];
       for (const name of segmentNames) {
         const data = await ffmpeg.readFile(name);
-        segments.push(data);
+        segments.push(new Blob([data], { type: 'video/mp4' }));
         try {
           await ffmpeg.deleteFile(name);
         } catch {
