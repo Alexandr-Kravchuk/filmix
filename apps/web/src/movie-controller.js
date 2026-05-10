@@ -1,5 +1,6 @@
 import { remuxEnglishTrack, segmentEnglishTrackFromBlob, getFfmpegLogTail, getFfmpegLastError } from './ffmpeg-engine.js';
 import { createMovieLogUploader } from './movie-log-uploader.js';
+import { readMovieProgress, writeMovieProgress, clearMovieProgress } from './movie-progress-store.js';
 
 const XBOX_SEGMENT_SECONDS = 3600;
 const DIAGNOSTIC_HISTORY_LIMIT = 80;
@@ -162,7 +163,13 @@ export function createMovieController(options) {
     onSegmentEnded: null,
     diagnostics: [],
     videoEventListeners: null,
-    globalListenersAttached: false
+    globalListenersAttached: false,
+    persistTimer: null,
+    pendingResumeAt: 0,
+    movieUrl: '',
+    movieDuration: 0,
+    movieSegmentCount: 0,
+    movieQuality: ''
   };
   const xboxSafeMode = options.xboxSafeMode === true;
   const uploader = options.logUploader || createMovieLogUploader({
@@ -261,8 +268,95 @@ export function createMovieController(options) {
       });
     });
   }
+  function readVideoCurrentTime() {
+    const v = options.elements.video;
+    if (!v) {
+      return 0;
+    }
+    const value = Number(v.currentTime || 0);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  }
+  function getCurrentGlobalTime() {
+    const local = readVideoCurrentTime();
+    const seconds = state.segmentSeconds || 0;
+    const index = state.segmentIndex || 0;
+    return index * seconds + local;
+  }
+  function persistProgress(force = false) {
+    if (!state.movieUrl) {
+      return;
+    }
+    const globalTime = getCurrentGlobalTime();
+    if (!force && globalTime <= 0.5) {
+      return;
+    }
+    writeMovieProgress({
+      url: state.movieUrl,
+      currentTime: globalTime,
+      segmentIndex: state.segmentIndex,
+      segmentSeconds: state.segmentSeconds,
+      segmentCount: state.movieSegmentCount,
+      duration: state.movieDuration,
+      quality: state.movieQuality
+    });
+  }
+  function schedulePersistProgress() {
+    if (state.persistTimer) {
+      return;
+    }
+    state.persistTimer = setTimeout(() => {
+      state.persistTimer = null;
+      persistProgress(false);
+    }, 3000);
+  }
+  function attachPersistListeners() {
+    const v = options.elements.video;
+    if (!v) {
+      return;
+    }
+    v.addEventListener('timeupdate', schedulePersistProgress);
+    v.addEventListener('pause', () => persistProgress(true));
+    v.addEventListener('ended', () => persistProgress(true));
+    if (typeof globalThis.addEventListener === 'function') {
+      const onUnload = () => persistProgress(true);
+      globalThis.addEventListener('pagehide', onUnload);
+      globalThis.addEventListener('beforeunload', onUnload);
+      if (typeof document !== 'undefined') {
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'hidden') {
+            persistProgress(true);
+          }
+        });
+      }
+    }
+  }
+  function applyPendingResume() {
+    if (!(state.pendingResumeAt > 0)) {
+      return;
+    }
+    const segments = state.segmentSeconds || 0;
+    const segmentStart = (state.segmentIndex || 0) * segments;
+    const target = Math.max(0, state.pendingResumeAt - segmentStart);
+    state.pendingResumeAt = 0;
+    if (target <= 1) {
+      return;
+    }
+    const video = options.elements.video;
+    if (!video) {
+      return;
+    }
+    const dur = Number(video.duration || 0);
+    const safeTarget = Number.isFinite(dur) && dur > 1 ? Math.min(target, dur - 0.5) : target;
+    try {
+      video.currentTime = safeTarget;
+      pushDiagnostic('movie:resume_seek', { segmentIndex: state.segmentIndex, target: Number(safeTarget.toFixed(2)) });
+    } catch (error) {
+      pushDiagnostic('movie:resume_seek_failed', { message: error && error.message });
+    }
+  }
   attachVideoEventListeners();
   attachGlobalErrorListeners();
+  attachPersistListeners();
   pushDiagnostic('controller:init', {
     xboxSafeMode,
     sessionId: uploader.sessionId,
@@ -332,6 +426,7 @@ export function createMovieController(options) {
     try {
       await options.elements.video.play();
       pushDiagnostic('segment:play_started', { index });
+      applyPendingResume();
       const translationLabel = translationName ? ` from ${translationName}` : '';
       setStatus(`Playing ${movieTitle} ${partLabel} in English${translationLabel}`);
     } catch (playError) {
@@ -346,6 +441,7 @@ export function createMovieController(options) {
       pushDiagnostic('segment:ended', { current: state.segmentIndex, next, total: state.segments.length });
       if (next >= state.segments.length) {
         setStatus(`Finished ${movieTitle} (${state.segments.length} parts)`);
+        clearMovieProgress();
         return;
       }
       void playSegmentAt(next, movieTitle, translationName);
@@ -367,6 +463,17 @@ export function createMovieController(options) {
       : XBOX_SEGMENT_SECONDS;
     const movieTitle = meta && meta.title ? meta.title : 'movie';
     const primaryTranslation = meta && meta.primary && meta.primary.translationName ? meta.primary.translationName : '';
+    state.movieUrl = url;
+    state.movieDuration = Number(meta && meta.duration) || 0;
+    state.movieSegmentCount = segmentCount;
+    state.movieQuality = quality;
+    let initialSegmentIndex = 0;
+    if (state.pendingResumeAt > 0 && segmentSeconds > 0) {
+      const computed = Math.floor(state.pendingResumeAt / segmentSeconds);
+      if (Number.isFinite(computed) && computed >= 0 && computed < segmentCount) {
+        initialSegmentIndex = computed;
+      }
+    }
     pushDiagnostic('xbox:meta_done', {
       duration: meta && meta.duration,
       segmentCount,
@@ -393,6 +500,7 @@ export function createMovieController(options) {
       pushDiagnostic('xbox:segment_ended', { current: state.segmentIndex, next, total: state.segments.length });
       if (next >= state.segments.length) {
         setStatus(`Finished ${movieTitle} (${state.segments.length} parts)`);
+        clearMovieProgress();
         return;
       }
       void playServerSegmentAt(next, movieTitle, primaryTranslation);
@@ -400,7 +508,7 @@ export function createMovieController(options) {
     options.elements.video.addEventListener('ended', state.onSegmentEnded);
     options.setProgress(1);
     options.setProgressText(`Streaming via local server • ${segmentCount} parts × ~${Math.round(segmentSeconds / 60)} min`);
-    await playServerSegmentAt(0, movieTitle, primaryTranslation);
+    await playServerSegmentAt(initialSegmentIndex, movieTitle, primaryTranslation);
   }
   async function playServerSegmentAt(index, movieTitle, translationName) {
     const total = state.segments.length;
@@ -418,6 +526,7 @@ export function createMovieController(options) {
     try {
       await options.elements.video.play();
       pushDiagnostic('xbox:segment_play_started', { index });
+      applyPendingResume();
       const translationLabel = translationName ? ` from ${translationName}` : '';
       setStatus(`Playing ${movieTitle} ${partLabel} in English${translationLabel}`);
     } catch (playError) {
@@ -436,6 +545,10 @@ export function createMovieController(options) {
     }
     state.diagnostics = [];
     pushDiagnostic('flow:start', { url: url.slice(0, 120), xboxSafeMode });
+    const stored = readMovieProgress();
+    if (!stored || stored.url !== url) {
+      state.pendingResumeAt = 0;
+    }
     let parsed;
     try {
       parsed = new URL(url);
@@ -613,19 +726,32 @@ export function createMovieController(options) {
         return;
       }
       const translationName = usedCandidate.translationName || '';
+      state.movieUrl = url;
+      state.movieQuality = quality;
       if (segmentResult) {
         state.segments = segmentResult.segments.map((entry) => entry instanceof Blob ? entry : new Blob([entry], { type: 'video/mp4' }));
         state.segmentSeconds = segmentResult.segmentSeconds;
+        state.movieSegmentCount = state.segments.length;
+        let initialIndex = 0;
+        if (state.pendingResumeAt > 0 && state.segmentSeconds > 0) {
+          const computed = Math.floor(state.pendingResumeAt / state.segmentSeconds);
+          if (Number.isFinite(computed) && computed >= 0 && computed < state.segments.length) {
+            initialIndex = computed;
+          }
+        }
         pushDiagnostic('segments:ready', {
           count: state.segments.length,
           segmentSeconds: state.segmentSeconds,
           sizes: state.segments.map((blob) => blob.size)
         });
         attachSegmentEndedListener(movieTitle, translationName);
-        await playSegmentAt(0, movieTitle, translationName);
+        await playSegmentAt(initialIndex, movieTitle, translationName);
         options.setProgress(1);
         options.setProgressText(`Ready • ${state.segments.length} parts × ~${Math.round(state.segmentSeconds / 60)} min`);
       } else {
+        state.segmentSeconds = 0;
+        state.movieSegmentCount = 1;
+        state.segmentIndex = 0;
         const blob = new Blob([outputBytes], { type: 'video/mp4' });
         releaseBlob();
         state.blobUrl = URL.createObjectURL(blob);
@@ -633,6 +759,7 @@ export function createMovieController(options) {
         options.elements.video.load();
         try {
           await options.elements.video.play();
+          applyPendingResume();
           const translationLabel = translationName ? ` from ${translationName}` : '';
           setStatus(`Playing ${movieTitle} in English${translationLabel}`);
         } catch {
@@ -665,8 +792,39 @@ export function createMovieController(options) {
     releaseBlob();
     clearSegments();
   }
+  function tryRestore({ autoStart = true } = {}) {
+    const stored = readMovieProgress();
+    if (!stored || !stored.url) {
+      return false;
+    }
+    if (options.elements.movieUrlInput) {
+      options.elements.movieUrlInput.value = stored.url;
+    }
+    if (stored.quality) {
+      const select = options.elements.movieQualitySelect;
+      if (select && Array.from(select.options || []).some((opt) => opt.value === stored.quality)) {
+        select.value = stored.quality;
+      }
+    }
+    state.pendingResumeAt = Number(stored.currentTime) > 0 ? Number(stored.currentTime) : 0;
+    pushDiagnostic('movie:resume_state_restored', {
+      currentTime: state.pendingResumeAt,
+      url: String(stored.url).slice(0, 120)
+    });
+    if (state.pendingResumeAt > 0) {
+      const minutes = Math.floor(state.pendingResumeAt / 60);
+      const seconds = Math.floor(state.pendingResumeAt % 60);
+      setStatus(`Resume position ${minutes}:${String(seconds).padStart(2, '0')} restored. ${autoStart && xboxSafeMode ? 'Auto-playing...' : 'Press Play to continue.'}`);
+    }
+    if (autoStart && xboxSafeMode) {
+      void playSelectedMovie();
+      return true;
+    }
+    return true;
+  }
   return {
     playSelectedMovie,
-    release
+    release,
+    tryRestore
   };
 }

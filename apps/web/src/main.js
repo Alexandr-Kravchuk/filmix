@@ -433,6 +433,10 @@ async function init() {
   } else {
     setBusy(false);
   }
+  try {
+    movie.tryRestore({ autoStart: true });
+  } catch {
+  }
 }
 
 elements.seasonSelect.addEventListener('change', () => {
