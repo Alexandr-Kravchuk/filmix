@@ -83,6 +83,26 @@ async function cleanupFiles(ffmpeg) {
     }
   }
 }
+async function cleanupSegmentFiles(ffmpeg) {
+  let names = [];
+  try {
+    const entries = await ffmpeg.listDir('/');
+    names = entries
+      .filter((entry) => entry && !entry.isDir && /^seg_\d+\.mp4$/.test(String(entry.name || '')))
+      .map((entry) => entry.name);
+  } catch {
+  }
+  for (const name of names) {
+    try {
+      await ffmpeg.deleteFile(name);
+    } catch {
+    }
+  }
+  try {
+    await ffmpeg.deleteFile('input.mp4');
+  } catch {
+  }
+}
 function resetFfmpegState(ffmpeg) {
   if (state.ffmpeg !== ffmpeg) {
     return;
@@ -103,6 +123,72 @@ export function warmupFfmpeg() {
   return enqueue(async () => {
     await ensureLoaded();
     return true;
+  });
+}
+export function segmentEnglishTrack(sourceBytes, onProgress, options = {}) {
+  const releaseAfter = options && options.releaseAfter === true;
+  const segmentSeconds = Number.isFinite(Number(options && options.segmentSeconds)) && Number(options.segmentSeconds) > 0
+    ? Math.floor(Number(options.segmentSeconds))
+    : 1200;
+  return enqueue(async () => {
+    const ffmpeg = await ensureLoaded(onProgress);
+    state.lastError = '';
+    state.activeProgress = onProgress ? (value) => onProgress(0.2 + value * 0.78) : null;
+    try {
+      await cleanupSegmentFiles(ffmpeg);
+      await ffmpeg.writeFile('input.mp4', sourceBytes);
+      const code = await ffmpeg.exec([
+        '-y',
+        '-i',
+        'input.mp4',
+        '-map',
+        '0:v:0',
+        '-map',
+        '0:a:m:language:eng',
+        '-c',
+        'copy',
+        '-f',
+        'segment',
+        '-segment_time',
+        String(segmentSeconds),
+        '-reset_timestamps',
+        '1',
+        '-movflags',
+        '+faststart',
+        'seg_%03d.mp4'
+      ]);
+      if (code !== 0) {
+        const details = state.lastError || state.logTail.join(' | ') || `ffmpeg exit code ${code}`;
+        throw new Error(`English track is not available in this source. ${details}`);
+      }
+      const entries = await ffmpeg.listDir('/');
+      const segmentNames = entries
+        .filter((entry) => entry && !entry.isDir && /^seg_\d+\.mp4$/.test(String(entry.name || '')))
+        .map((entry) => entry.name)
+        .sort();
+      if (!segmentNames.length) {
+        throw new Error('English track segmenting produced no output files');
+      }
+      const segments = [];
+      for (const name of segmentNames) {
+        const data = await ffmpeg.readFile(name);
+        segments.push(data);
+        try {
+          await ffmpeg.deleteFile(name);
+        } catch {
+        }
+      }
+      return {
+        segments,
+        segmentSeconds
+      };
+    } finally {
+      state.activeProgress = null;
+      await cleanupSegmentFiles(ffmpeg);
+      if (releaseAfter) {
+        resetFfmpegState(ffmpeg);
+      }
+    }
   });
 }
 export function remuxEnglishTrack(sourceBytes, onProgress, options = {}) {

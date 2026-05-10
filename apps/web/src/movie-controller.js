@@ -1,4 +1,6 @@
-import { remuxEnglishTrack } from './ffmpeg-engine.js';
+import { remuxEnglishTrack, segmentEnglishTrack } from './ffmpeg-engine.js';
+
+const XBOX_SEGMENT_SECONDS = 1200;
 
 const MAX_SOURCE_BYTES = 1024 * 1024 * 1024;
 
@@ -106,7 +108,11 @@ export function createMovieController(options) {
   const state = {
     requestId: 0,
     blobUrl: '',
-    isBusy: false
+    isBusy: false,
+    segments: [],
+    segmentIndex: 0,
+    segmentSeconds: 0,
+    onSegmentEnded: null
   };
   const xboxSafeMode = options.xboxSafeMode === true;
   function setStatus(message, isError = false) {
@@ -130,6 +136,60 @@ export function createMovieController(options) {
       URL.revokeObjectURL(state.blobUrl);
       state.blobUrl = '';
     }
+  }
+  function detachSegmentEndedListener() {
+    if (state.onSegmentEnded) {
+      options.elements.video.removeEventListener('ended', state.onSegmentEnded);
+      state.onSegmentEnded = null;
+    }
+  }
+  function clearSegments() {
+    detachSegmentEndedListener();
+    state.segments = [];
+    state.segmentIndex = 0;
+    state.segmentSeconds = 0;
+  }
+  function formatSegmentRange(index) {
+    const start = index * state.segmentSeconds;
+    const end = start + state.segmentSeconds;
+    function format(value) {
+      const total = Math.max(0, Math.floor(value));
+      const minutes = Math.floor(total / 60);
+      const seconds = total % 60;
+      return `${minutes}:${String(seconds).padStart(2, '0')}`;
+    }
+    return `${format(start)}–${format(end)}`;
+  }
+  async function playSegmentAt(index, movieTitle, translationName) {
+    const total = state.segments.length;
+    if (index < 0 || index >= total) {
+      return;
+    }
+    state.segmentIndex = index;
+    releaseBlob();
+    state.blobUrl = URL.createObjectURL(state.segments[index]);
+    options.elements.video.src = state.blobUrl;
+    options.elements.video.load();
+    const partLabel = `part ${index + 1}/${total} (${formatSegmentRange(index)})`;
+    try {
+      await options.elements.video.play();
+      const translationLabel = translationName ? ` from ${translationName}` : '';
+      setStatus(`Playing ${movieTitle} ${partLabel} in English${translationLabel}`);
+    } catch {
+      setStatus(`Autoplay blocked on ${partLabel}. Click Play in the player to continue.`, true);
+    }
+  }
+  function attachSegmentEndedListener(movieTitle, translationName) {
+    detachSegmentEndedListener();
+    state.onSegmentEnded = () => {
+      const next = state.segmentIndex + 1;
+      if (next >= state.segments.length) {
+        setStatus(`Finished ${movieTitle} (${state.segments.length} parts)`);
+        return;
+      }
+      void playSegmentAt(next, movieTitle, translationName);
+    };
+    options.elements.video.addEventListener('ended', state.onSegmentEnded);
   }
   async function playSelectedMovie() {
     if (state.isBusy) {
@@ -168,6 +228,8 @@ export function createMovieController(options) {
         throw new Error('Movie playback URL is missing');
       }
       const movieTitle = payload && payload.title ? payload.title : 'movie';
+      clearSegments();
+      let segmentResult = null;
       let outputBytes = null;
       let usedCandidate = null;
       let lastError = null;
@@ -197,19 +259,34 @@ export function createMovieController(options) {
         if (requestId !== state.requestId) {
           return;
         }
+        const remuxLabel = xboxSafeMode ? 'splitting English track into parts' : 'remuxing English track';
         setStatus(`Extracting English audio track${translation}${candidateLabel}...`);
         try {
-          outputBytes = await remuxEnglishTrack(
-            sourceBytes,
-            (progress) => {
-              if (requestId !== state.requestId) {
-                return;
-              }
-              options.setProgress(0.6 + progress * 0.38);
-              options.setProgressText(`${Math.round(progress * 100)}% remuxing English track${candidateLabel}`);
-            },
-            { releaseAfter: xboxSafeMode }
-          );
+          if (xboxSafeMode) {
+            segmentResult = await segmentEnglishTrack(
+              sourceBytes,
+              (progress) => {
+                if (requestId !== state.requestId) {
+                  return;
+                }
+                options.setProgress(0.6 + progress * 0.38);
+                options.setProgressText(`${Math.round(progress * 100)}% ${remuxLabel}${candidateLabel}`);
+              },
+              { releaseAfter: true, segmentSeconds: XBOX_SEGMENT_SECONDS }
+            );
+          } else {
+            outputBytes = await remuxEnglishTrack(
+              sourceBytes,
+              (progress) => {
+                if (requestId !== state.requestId) {
+                  return;
+                }
+                options.setProgress(0.6 + progress * 0.38);
+                options.setProgressText(`${Math.round(progress * 100)}% ${remuxLabel}${candidateLabel}`);
+              },
+              { releaseAfter: false }
+            );
+          }
           usedCandidate = candidate;
           break;
         } catch (remuxError) {
@@ -220,26 +297,36 @@ export function createMovieController(options) {
           continue;
         }
       }
-      if (!outputBytes || !usedCandidate) {
+      if ((!outputBytes && !segmentResult) || !usedCandidate) {
         throw lastError || new Error('No movie translation contains an English audio track');
       }
       if (requestId !== state.requestId) {
         return;
       }
-      const blob = new Blob([outputBytes], { type: 'video/mp4' });
-      releaseBlob();
-      state.blobUrl = URL.createObjectURL(blob);
-      options.elements.video.src = state.blobUrl;
-      options.elements.video.load();
-      try {
-        await options.elements.video.play();
-        const translationLabel = usedCandidate.translationName ? ` from ${usedCandidate.translationName}` : '';
-        setStatus(`Playing ${movieTitle} in English${translationLabel}`);
-      } catch {
-        setStatus('Autoplay blocked. Click Play in the player to start.', true);
+      const translationName = usedCandidate.translationName || '';
+      if (segmentResult) {
+        state.segments = segmentResult.segments.map((bytes) => new Blob([bytes], { type: 'video/mp4' }));
+        state.segmentSeconds = segmentResult.segmentSeconds;
+        attachSegmentEndedListener(movieTitle, translationName);
+        await playSegmentAt(0, movieTitle, translationName);
+        options.setProgress(1);
+        options.setProgressText(`Ready • ${state.segments.length} parts × ~${Math.round(state.segmentSeconds / 60)} min`);
+      } else {
+        const blob = new Blob([outputBytes], { type: 'video/mp4' });
+        releaseBlob();
+        state.blobUrl = URL.createObjectURL(blob);
+        options.elements.video.src = state.blobUrl;
+        options.elements.video.load();
+        try {
+          await options.elements.video.play();
+          const translationLabel = translationName ? ` from ${translationName}` : '';
+          setStatus(`Playing ${movieTitle} in English${translationLabel}`);
+        } catch {
+          setStatus('Autoplay blocked. Click Play in the player to start.', true);
+        }
+        options.setProgress(1);
+        options.setProgressText('100% • Ready');
       }
-      options.setProgress(1);
-      options.setProgressText('100% • Ready');
     } catch (error) {
       if (requestId !== state.requestId) {
         return;
@@ -256,6 +343,7 @@ export function createMovieController(options) {
   }
   function release() {
     releaseBlob();
+    clearSegments();
   }
   return {
     playSelectedMovie,
