@@ -468,7 +468,13 @@ export function createMovieController(options) {
                 options.setProgress(0.6 + progress * 0.38);
                 options.setProgressText(`${Math.round(progress * 100)}% ${remuxLabel}${candidateLabel}`);
               },
-              { releaseAfter: true, segmentSeconds: XBOX_SEGMENT_SECONDS }
+              {
+                releaseAfter: true,
+                segmentSeconds: XBOX_SEGMENT_SECONDS,
+                onDiagnostic: (stage, details) => {
+                  pushDiagnostic(stage, { ...details, candidateIndex: index });
+                }
+              }
             );
             sourceBlob = null;
             pushDiagnostic('ffmpeg:segment_done', {

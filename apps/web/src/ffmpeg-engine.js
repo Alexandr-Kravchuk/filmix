@@ -162,16 +162,35 @@ export function segmentEnglishTrackFromBlob(sourceBlob, onProgress, options = {}
   const segmentSeconds = Number.isFinite(Number(options && options.segmentSeconds)) && Number(options.segmentSeconds) > 0
     ? Math.floor(Number(options.segmentSeconds))
     : 1200;
+  const onDiagnostic = typeof options.onDiagnostic === 'function' ? options.onDiagnostic : () => {};
   return enqueue(async () => {
     const ffmpeg = await ensureLoaded(onProgress);
     state.lastError = '';
-    state.activeProgress = onProgress ? (value) => onProgress(0.2 + value * 0.78) : null;
+    let lastLoggedDecile = -1;
+    state.activeProgress = (value) => {
+      const normalized = Math.max(0, Math.min(1, Number(value) || 0));
+      if (onProgress) {
+        onProgress(0.2 + normalized * 0.78);
+      }
+      const decile = Math.floor(normalized * 10);
+      if (decile > lastLoggedDecile) {
+        lastLoggedDecile = decile;
+        try {
+          onDiagnostic('ffmpeg:progress', { decile, value: Number(normalized.toFixed(3)) });
+        } catch {
+        }
+      }
+    };
     let mounted = false;
     try {
+      onDiagnostic('ffmpeg:cleanup_pre');
       await cleanupSegmentFiles(ffmpeg);
+      onDiagnostic('ffmpeg:mount_start', { inputBytes: sourceBlob ? sourceBlob.size : 0 });
       await safeMountInputBlob(ffmpeg, sourceBlob);
       mounted = true;
+      onDiagnostic('ffmpeg:mount_done');
       const inputPath = `${INPUT_MOUNT_POINT}/${INPUT_MOUNT_FILE}`;
+      onDiagnostic('ffmpeg:exec_started', { segmentSeconds });
       const code = await ffmpeg.exec([
         '-y',
         '-i',
@@ -192,38 +211,58 @@ export function segmentEnglishTrackFromBlob(sourceBlob, onProgress, options = {}
         '+faststart',
         'seg_%03d.mp4'
       ]);
+      onDiagnostic('ffmpeg:exec_returned', { code, lastError: state.lastError || '' });
       if (code !== 0) {
         const details = state.lastError || state.logTail.join(' | ') || `ffmpeg exit code ${code}`;
         throw new Error(`English track is not available in this source. ${details}`);
       }
+      onDiagnostic('ffmpeg:unmount_after_exec_start');
+      if (mounted) {
+        await safeUnmountInput(ffmpeg);
+        mounted = false;
+      }
+      onDiagnostic('ffmpeg:unmount_after_exec_done');
       const entries = await ffmpeg.listDir('/');
       const segmentNames = entries
         .filter((entry) => entry && !entry.isDir && /^seg_\d+\.mp4$/.test(String(entry.name || '')))
         .map((entry) => entry.name)
         .sort();
+      onDiagnostic('ffmpeg:listDir_done', { count: segmentNames.length });
       if (!segmentNames.length) {
         throw new Error('English track segmenting produced no output files');
       }
       const segments = [];
-      for (const name of segmentNames) {
+      for (let index = 0; index < segmentNames.length; index += 1) {
+        const name = segmentNames[index];
+        onDiagnostic('ffmpeg:readFile_start', { index, name });
         const data = await ffmpeg.readFile(name);
+        const bytes = data && data.length ? data.length : 0;
+        onDiagnostic('ffmpeg:readFile_done', { index, name, bytes });
         segments.push(new Blob([data], { type: 'video/mp4' }));
+        onDiagnostic('ffmpeg:blob_pushed', { index, name, bytes });
         try {
           await ffmpeg.deleteFile(name);
-        } catch {
+          onDiagnostic('ffmpeg:deleteFile_done', { index, name });
+        } catch (deleteError) {
+          onDiagnostic('ffmpeg:deleteFile_failed', { index, name, message: deleteError && deleteError.message });
         }
       }
+      onDiagnostic('ffmpeg:read_loop_done', { count: segments.length });
       return {
         segments,
         segmentSeconds
       };
     } finally {
       if (mounted) {
-        await safeUnmountInput(ffmpeg);
+        try {
+          await safeUnmountInput(ffmpeg);
+        } catch {
+        }
       }
       state.activeProgress = null;
       await cleanupSegmentFiles(ffmpeg);
       if (releaseAfter) {
+        onDiagnostic('ffmpeg:release_after');
         resetFfmpegState(ffmpeg);
       }
     }
