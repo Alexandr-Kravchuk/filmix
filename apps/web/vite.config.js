@@ -13,9 +13,23 @@ function resolveBase() {
   return `/${repoName}/`;
 }
 
+function resolveAllowedHosts() {
+  const fromEnv = String(process.env.VITE_ALLOWED_HOSTS || '').trim();
+  const baseHosts = ['.trycloudflare.com', '.loca.lt', '.ngrok-free.app', '.serveo.net'];
+  if (!fromEnv) {
+    return baseHosts;
+  }
+  const extra = fromEnv.split(',').map((entry) => entry.trim()).filter(Boolean);
+  return baseHosts.concat(extra);
+}
+
 export default defineConfig({
   base: resolveBase(),
   optimizeDeps: {
     exclude: ['@ffmpeg/ffmpeg', '@ffmpeg/util']
+  },
+  server: {
+    host: true,
+    allowedHosts: resolveAllowedHosts()
   }
 });

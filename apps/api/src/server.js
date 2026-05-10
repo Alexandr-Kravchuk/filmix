@@ -30,6 +30,7 @@ function parseCorsOrigins(value) {
     .filter(Boolean);
 }
 
+const TUNNEL_HOST_SUFFIXES = ['.trycloudflare.com', '.loca.lt', '.ngrok-free.app', '.ngrok.io', '.serveo.net'];
 function isAllowedOrigin(origin, allowedOrigins, allowLocalhostOrigins) {
   if (!origin) {
     return true;
@@ -37,7 +38,20 @@ function isAllowedOrigin(origin, allowedOrigins, allowLocalhostOrigins) {
   if (allowLocalhostOrigins && origin.startsWith('http://localhost:')) {
     return true;
   }
-  return allowedOrigins.includes(origin);
+  if (allowedOrigins.includes(origin)) {
+    return true;
+  }
+  let parsedOrigin;
+  try {
+    parsedOrigin = new URL(origin);
+  } catch {
+    return false;
+  }
+  const host = String(parsedOrigin.hostname || '').toLowerCase();
+  if (parsedOrigin.protocol === 'https:' && TUNNEL_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix))) {
+    return true;
+  }
+  return false;
 }
 
 function parseBoolean(value, defaultValue) {

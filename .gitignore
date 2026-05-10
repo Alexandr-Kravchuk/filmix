@@ -9,3 +9,4 @@ npm-debug.log*
 /apps/api/data/*.local.json
 .idea/
 tmp/bench-results/
+scripts/bin/
