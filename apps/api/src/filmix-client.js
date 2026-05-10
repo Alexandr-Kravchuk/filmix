@@ -47,6 +47,10 @@ function parsePostId(pageUrl) {
   return match[1];
 }
 
+export function parseFilmixPostId(pageUrl) {
+  return parsePostId(pageUrl);
+}
+
 export class FilmixClient {
   constructor(config) {
     this.pageUrl = config.pageUrl;
@@ -171,17 +175,28 @@ export class FilmixClient {
   }
 
   async getPlayerData() {
+    return this.fetchPlayerDataInternal({ postId: this.postId, refererUrl: this.pageUrl });
+  }
+  async getPlayerDataForUrl(pageUrl) {
+    const targetUrl = String(pageUrl || '').trim();
+    if (!targetUrl) {
+      throw new Error('pageUrl is required');
+    }
+    const targetPostId = parsePostId(targetUrl);
+    return this.fetchPlayerDataInternal({ postId: targetPostId, refererUrl: targetUrl });
+  }
+  async fetchPlayerDataInternal({ postId, refererUrl }) {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       await this.ensureAuthenticated(attempt > 0);
       const body = new URLSearchParams({
-        post_id: this.postId,
+        post_id: postId,
         showfull: 'true'
       });
       const response = await this.request(`${this.origin}/api/movies/player-data?t=${Date.now()}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-          Referer: this.pageUrl,
+          Referer: refererUrl || this.pageUrl,
           Origin: this.origin,
           'X-Requested-With': 'XMLHttpRequest',
           Accept: 'application/json, text/javascript, */*; q=0.01'

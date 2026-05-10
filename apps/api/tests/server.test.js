@@ -271,6 +271,135 @@ test('resolves season 12 episode 1 by falling back from ukrainian to another tra
   assert.equal(ladderResponse.body.sources.length, 2);
 });
 
+test('movie endpoint returns ordered candidates with ukrainian translation as primary', async () => {
+  const moviePlayerData = {
+    message: {
+      title: 'PAW Patrol Christmas',
+      translations: {
+        video: {
+          'MVO [1080, заКАДРЫ]': encodePlayerjsValue('[480p]https://cdn.example/movie/mvo_480.mp4,[1080p]https://cdn.example/movie/mvo_1080.mp4'),
+          'Дубляж [1080, Ukr, 1+1]': encodePlayerjsValue('[480p]https://cdn.example/movie/ukr_480.mp4,[1080p]https://cdn.example/movie/ukr_1080.mp4'),
+          'Дубляж [1080, Blackbird Sound]': encodePlayerjsValue('[1080p]https://cdn.example/movie/blackbird_1080.mp4')
+        }
+      },
+      links: []
+    }
+  };
+  const app = createTestApp({
+    filmixClient: {
+      async getPlayerData() {
+        return playerDataFixture;
+      },
+      async getPlayerDataForUrl() {
+        return moviePlayerData;
+      }
+    }
+  });
+  const response = await request(app)
+    .get('/api/movie')
+    .query({ url: 'https://filmix.zip/mults/semejnye/181452-foo.html' })
+    .expect(200);
+  assert.equal(Array.isArray(response.body.candidates), true);
+  assert.equal(response.body.candidates.length, 3);
+  assert.equal(response.body.candidates[0].translationName, 'Дубляж [1080, Ukr, 1+1]');
+  assert.equal(response.body.translationName, 'Дубляж [1080, Ukr, 1+1]');
+  assert.equal(response.body.candidates.every((item) => typeof item.playbackUrl === 'string'), true);
+  assert.equal(response.body.candidates.every((item) => !Object.hasOwn(item, 'sourceUrl')), true);
+});
+
+test('movie endpoint returns tokenized playback for ukrainian translation with quality fallback', async () => {
+  const moviePlayerData = {
+    message: {
+      title: 'PAW Patrol Christmas',
+      translations: {
+        video: {
+          'MVO [1080, заКАДРЫ]': encodePlayerjsValue('[480p]https://cdn.example/movie/mvo_480.mp4,[1080p]https://cdn.example/movie/mvo_1080.mp4'),
+          'Дубляж [1080, Ukr, 1+1]': encodePlayerjsValue('[480p]https://cdn.example/movie/ukr_480.mp4,[720p]https://cdn.example/movie/ukr_720.mp4,[1080p]https://cdn.example/movie/ukr_1080.mp4'),
+          'Дубляж [1080, Blackbird Sound]': encodePlayerjsValue('[1080p]https://cdn.example/movie/blackbird_1080.mp4')
+        }
+      },
+      links: []
+    }
+  };
+  const calls = [];
+  const app = createTestApp({
+    filmixClient: {
+      async getPlayerData() {
+        throw new Error('series getPlayerData should not be called for movie endpoint');
+      },
+      async getPlayerDataForUrl(pageUrl) {
+        calls.push(pageUrl);
+        return moviePlayerData;
+      }
+    }
+  });
+  const movieMax = await request(app)
+    .get('/api/movie')
+    .query({ url: 'https://filmix.zip/mults/semejnye/181452-v-schenyachiy-patrul-rozhdestvo-2025.html' })
+    .expect(200);
+  assert.equal(calls[0], 'https://filmix.zip/mults/semejnye/181452-v-schenyachiy-patrul-rozhdestvo-2025.html');
+  assert.equal(movieMax.body.title, 'PAW Patrol Christmas');
+  assert.equal(movieMax.body.translationName, 'Дубляж [1080, Ukr, 1+1]');
+  assert.equal(movieMax.body.quality, 1080);
+  assert.match(String(movieMax.body.playbackUrl || ''), /^\/api\/stream\//);
+  assert.equal(Object.hasOwn(movieMax.body, 'sourceUrl'), false);
+  assert.deepEqual(movieMax.body.availableQualities, [480, 720, 1080]);
+  const movie480 = await request(app)
+    .get('/api/movie')
+    .query({
+      url: 'https://filmix.zip/mults/semejnye/181452-v-schenyachiy-patrul-rozhdestvo-2025.html',
+      quality: '480'
+    })
+    .expect(200);
+  assert.equal(movie480.body.quality, 480);
+});
+
+test('movie endpoint validates filmix url and quality', async () => {
+  const app = createTestApp({
+    filmixClient: {
+      async getPlayerData() {
+        return playerDataFixture;
+      },
+      async getPlayerDataForUrl() {
+        throw new Error('should not be called for invalid url');
+      }
+    }
+  });
+  await request(app).get('/api/movie').expect(400);
+  await request(app).get('/api/movie').query({ url: 'https://example.com/movie.html' }).expect(400);
+  await request(app).get('/api/movie').query({ url: 'https://filmix.zip/about' }).expect(400);
+  await request(app).get('/api/movie').query({
+    url: 'https://filmix.zip/mults/semejnye/181452-v-schenyachiy-patrul-rozhdestvo-2025.html',
+    quality: 'bad'
+  }).expect(400);
+});
+
+test('movie endpoint returns 404 when no movie sources are available', async () => {
+  const app = createTestApp({
+    filmixClient: {
+      async getPlayerData() {
+        return playerDataFixture;
+      },
+      async getPlayerDataForUrl() {
+        return {
+          message: {
+            translations: {
+              video: {
+                'Original [English]': encodePlayerjsValue('https://filmix.zip/pl/series.txt')
+              }
+            },
+            links: []
+          }
+        };
+      }
+    }
+  });
+  await request(app)
+    .get('/api/movie')
+    .query({ url: 'https://filmix.zip/mults/semejnye/181452-v-schenyachiy-patrul-rozhdestvo-2025.html' })
+    .expect(404);
+});
+
 test('uses strict validation for season and episode', async () => {
   const app = createTestApp();
   await request(app).get('/api/source').query({ season: '1.5', episode: 1 }).expect(400);

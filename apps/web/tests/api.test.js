@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fetchShow, fetchSourceByEpisode, fetchSourceBatch, fetchSourceLadder, fetchPlaybackProgress, savePlaybackProgress, sendPlaybackProgressBeacon, getApiBaseUrl } from '../src/api.js';
+import { fetchShow, fetchSourceByEpisode, fetchSourceBatch, fetchSourceLadder, fetchMovieByUrl, fetchPlaybackProgress, savePlaybackProgress, sendPlaybackProgressBeacon, getApiBaseUrl } from '../src/api.js';
 
 test('uses localhost api base by default', () => {
   assert.equal(getApiBaseUrl(), 'http://localhost:3000');
@@ -100,6 +100,29 @@ test('loads source by episode with quality', async () => {
     globalThis.fetch = originalFetch;
   }
   assert.match(calledUrl, /\/api\/source\?season=5&episode=11&quality=max$/);
+});
+
+test('loads movie metadata by url with quality', async () => {
+  const originalFetch = globalThis.fetch;
+  let calledUrl = '';
+  globalThis.fetch = async (url) => {
+    calledUrl = String(url);
+    return {
+      ok: true,
+      async json() {
+        return { title: 'Movie' };
+      }
+    };
+  };
+  try {
+    await fetchMovieByUrl('https://filmix.zip/mults/semejnye/181452-foo.html', '720');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.match(
+    calledUrl,
+    /\/api\/movie\?url=https%3A%2F%2Ffilmix\.zip%2Fmults%2Fsemejnye%2F181452-foo\.html&quality=720$/
+  );
 });
 
 test('loads source ladder for episode', async () => {

@@ -255,6 +255,57 @@ export async function fetchDecodedPlaylistJson(playlistUrl, options = {}) {
   return decodePlaylistJson(playlistText, options.decodeConfig || defaultDecodeConfig);
 }
 
+export function resolveMovieVariantsFromPlayerData(playerData, options = {}) {
+  const candidates = resolveMovieCandidatesFromPlayerData(playerData, options);
+  if (!candidates.length) {
+    return null;
+  }
+  return candidates[0];
+}
+export function resolveMovieCandidatesFromPlayerData(playerData, options = {}) {
+  const translations = getVideoTranslations(playerData);
+  if (!translations) {
+    throw new Error('player-data does not contain translations.video');
+  }
+  const entries = Object.entries(translations).filter((entry) => typeof entry[1] === 'string' && entry[1].startsWith('#2'));
+  if (!entries.length) {
+    throw new Error('player-data does not contain decodable translation entries');
+  }
+  const ordered = orderTranslationEntries(entries, options.preferredTranslationPattern);
+  const decodeConfig = options.decodeConfig || defaultDecodeConfig;
+  const result = [];
+  for (const [translationName, encodedValue] of ordered) {
+    const decoded = decodePlayerjsValue(encodedValue, decodeConfig);
+    if (decoded.startsWith('http')) {
+      continue;
+    }
+    const variants = sortQualityAsc(parseQualityVariants(decoded));
+    if (!variants.length) {
+      continue;
+    }
+    result.push({
+      translationName,
+      variants
+    });
+  }
+  return result;
+}
+export function resolveMovieSourceFromPlayerData(playerData, options = {}) {
+  const resolved = resolveMovieVariantsFromPlayerData(playerData, options);
+  if (!resolved) {
+    return null;
+  }
+  const selected = pickVariant(resolved.variants, options.preferredQuality || Number.MAX_SAFE_INTEGER);
+  if (!selected || !selected.url) {
+    return null;
+  }
+  return {
+    sourceUrl: selected.url,
+    quality: selected.quality,
+    variants: resolved.variants,
+    translationName: resolved.translationName
+  };
+}
 export async function resolveEpisodeSourceFromPlayerData(playerData, options = {}) {
   const season = Number.parseInt(String(options.season || ''), 10);
   const episode = Number.parseInt(String(options.episode || ''), 10);

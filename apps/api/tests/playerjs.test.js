@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { decodePlayerjsValue, findEpisodeVariants, pickTranslation, pickVariant, resolveEpisodeSourceFromPlayerData, resolvePlaylistUrlsFromPlayerData } from '../src/playerjs-service.js';
+import { decodePlayerjsValue, findEpisodeVariants, pickTranslation, pickVariant, resolveEpisodeSourceFromPlayerData, resolveMovieSourceFromPlayerData, resolveMovieVariantsFromPlayerData, resolvePlaylistUrlsFromPlayerData } from '../src/playerjs-service.js';
 
 const decodeConfig = Object.freeze({
   file3Separator: ':<:',
@@ -277,6 +277,77 @@ test('returns ordered translation playlist candidates', () => {
   );
 });
 
+
+test('resolves movie variants from translation with file variants payload', () => {
+  const playerData = {
+    message: {
+      translations: {
+        video: {
+          'Дубляж [1080, Ukr, 1+1]': encodePlayerjsValue('[480p]https://cdn.example/movie/ukr_480.mp4,[720p]https://cdn.example/movie/ukr_720.mp4,[1080p]https://cdn.example/movie/ukr_1080.mp4'),
+          'MVO [1080, заКАДРЫ]': encodePlayerjsValue('[480p]https://cdn.example/movie/mvo_480.mp4,[1080p]https://cdn.example/movie/mvo_1080.mp4')
+        }
+      }
+    }
+  };
+  const info = resolveMovieVariantsFromPlayerData(playerData, {
+    preferredTranslationPattern: 'ukr|укра'
+  });
+  assert.equal(info.translationName, 'Дубляж [1080, Ukr, 1+1]');
+  assert.deepEqual(info.variants.map((variant) => variant.quality), [480, 720, 1080]);
+});
+
+test('selects ukrainian movie variant by max quality', () => {
+  const playerData = {
+    message: {
+      translations: {
+        video: {
+          'Дубляж [1080, Ukr, 1+1]': encodePlayerjsValue('[480p]https://cdn.example/movie/ukr_480.mp4,[720p]https://cdn.example/movie/ukr_720.mp4,[1080p]https://cdn.example/movie/ukr_1080.mp4'),
+          'MVO [1080, заКАДРЫ]': encodePlayerjsValue('[1080p]https://cdn.example/movie/mvo_1080.mp4')
+        }
+      }
+    }
+  };
+  const selected = resolveMovieSourceFromPlayerData(playerData, {
+    preferredTranslationPattern: 'ukr|укра'
+  });
+  assert.equal(selected.sourceUrl, 'https://cdn.example/movie/ukr_1080.mp4');
+  assert.equal(selected.quality, 1080);
+  assert.equal(selected.translationName, 'Дубляж [1080, Ukr, 1+1]');
+});
+
+test('falls back to lower quality when preferred quality is missing for movie', () => {
+  const playerData = {
+    message: {
+      translations: {
+        video: {
+          'Дубляж [1080, Ukr, 1+1]': encodePlayerjsValue('[720p]https://cdn.example/movie/ukr_720.mp4,[1080p]https://cdn.example/movie/ukr_1080.mp4')
+        }
+      }
+    }
+  };
+  const selected = resolveMovieSourceFromPlayerData(playerData, {
+    preferredTranslationPattern: 'ukr|укра',
+    preferredQuality: 480
+  });
+  assert.equal(selected.sourceUrl, 'https://cdn.example/movie/ukr_720.mp4');
+  assert.equal(selected.quality, 720);
+});
+
+test('returns null for movie variants when only series playlist urls are present', () => {
+  const playerData = {
+    message: {
+      translations: {
+        video: {
+          'Original [English]': encodePlayerjsValue('https://filmix.zip/pl/series.txt')
+        }
+      }
+    }
+  };
+  const info = resolveMovieVariantsFromPlayerData(playerData, {
+    preferredTranslationPattern: 'ukr|укра'
+  });
+  assert.equal(info, null);
+});
 
 test('prefers english translation and ignores ukrainian fallback', () => {
   const preferred = pickTranslation({

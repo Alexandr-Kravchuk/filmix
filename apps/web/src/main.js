@@ -1,10 +1,11 @@
 import './styles.css';
-import { fetchShow, fetchSourceByEpisode, fetchSourceBatch, fetchSourceLadder, fetchPlaybackProgress, savePlaybackProgress, sendPlaybackProgressBeacon, getApiBaseUrl } from './api.js';
+import { fetchShow, fetchSourceByEpisode, fetchSourceBatch, fetchSourceLadder, fetchMovieByUrl, fetchPlaybackProgress, savePlaybackProgress, sendPlaybackProgressBeacon, getApiBaseUrl } from './api.js';
 import { readShowCache, writeShowCache, clearShowCache } from './show-cache.js';
 import { createCatalogController } from './catalog-controller.js';
 import { createTaskQueue } from './task-queue.js';
 import { createProgressSyncController } from './progress-sync.js';
 import { createPlaybackController } from './playback-controller.js';
+import { createMovieController } from './movie-controller.js';
 
 function parseBooleanEnv(value, fallback = true) {
   if (value === undefined || value === null || String(value).trim() === '') {
@@ -121,7 +122,11 @@ const elements = {
   video: document.getElementById('video'),
   modeToggleButton: document.getElementById('mode-toggle-btn'),
   refreshEpisodesButton: document.getElementById('refresh-episodes-btn'),
-  diagnosticsText: document.getElementById('diagnostics-text')
+  diagnosticsText: document.getElementById('diagnostics-text'),
+  movieUrlInput: document.getElementById('movie-url-input'),
+  movieQualitySelect: document.getElementById('movie-quality-select'),
+  moviePlayButton: document.getElementById('movie-play-btn'),
+  movieStatus: document.getElementById('movie-status')
 };
 const state = {
   isBusy: false,
@@ -184,6 +189,13 @@ function updateDiagnostics(diagnostics = []) {
 function setStatus(message, isError = false) {
   elements.status.textContent = message;
   elements.status.classList.toggle('error', isError);
+}
+function setMovieStatus(message, isError = false) {
+  if (!elements.movieStatus) {
+    return;
+  }
+  elements.movieStatus.textContent = message;
+  elements.movieStatus.classList.toggle('error', isError);
 }
 function setBackgroundStatus(message, isError = false) {
   elements.backgroundStatus.textContent = message;
@@ -350,6 +362,15 @@ const progressSync = createProgressSyncController({
   savePlaybackProgress,
   sendPlaybackProgressBeacon
 });
+const movie = createMovieController({
+  elements,
+  fetchMovieByUrl,
+  getApiBaseUrl,
+  setMovieStatus,
+  setProgress,
+  setProgressText,
+  xboxSafeMode
+});
 const playback = createPlaybackController({
   elements,
   catalog,
@@ -419,6 +440,15 @@ elements.episodeSelect.addEventListener('change', () => {
 });
 elements.playButton.addEventListener('click', () => {
   void playback.playSelectedEpisode(false);
+});
+elements.moviePlayButton.addEventListener('click', () => {
+  void movie.playSelectedMovie();
+});
+elements.movieUrlInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    void movie.playSelectedMovie();
+  }
 });
 elements.video.addEventListener('ended', () => {
   void playback.onVideoEnded();

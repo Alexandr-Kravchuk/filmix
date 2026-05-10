@@ -8,7 +8,7 @@ import { FilmixClient } from './filmix-client.js';
 import { createCatalog, getEpisodeData } from './catalog-service.js';
 import { getDefaultEnglishMapPath, loadEnglishMap, saveEnglishMap } from './english-map-service.js';
 import { parseHarToEnglishMap } from './har-import-service.js';
-import { resolveEpisodeSourceFromPlayerData } from './playerjs-service.js';
+import { resolveEpisodeSourceFromPlayerData, resolveMovieCandidatesFromPlayerData, resolveMovieSourceFromPlayerData, resolveMovieVariantsFromPlayerData, pickVariant } from './playerjs-service.js';
 import { proxyVideoRequest } from './proxy-service.js';
 import { createSourceCacheService } from './source-cache-service.js';
 import { createPlaybackTokenService } from './playback-token-service.js';
@@ -215,6 +215,43 @@ function createRateLimiter(config = {}) {
 function buildSourceKey(value) {
   const normalized = String(value || '');
   return createHash('sha256').update(normalized).digest('hex').slice(0, 16);
+}
+function parseFilmixPageUrl(value) {
+  const raw = String(value === undefined || value === null ? '' : value).trim();
+  if (!raw) {
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return null;
+  }
+  if (!/(^|\.)filmix\./i.test(parsed.hostname)) {
+    return null;
+  }
+  if (!/\/(\d+)-[^/]+\.html$/i.test(parsed.pathname)) {
+    return null;
+  }
+  parsed.search = '';
+  parsed.hash = '';
+  return parsed.toString();
+}
+function extractMovieTitle(playerData) {
+  const message = playerData && playerData.message ? playerData.message : null;
+  if (!message) {
+    return '';
+  }
+  for (const key of ['title', 'name', 'rus_title', 'orig_title']) {
+    const value = message[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+  return '';
 }
 
 export function createApp(config) {
@@ -542,7 +579,8 @@ export function createApp(config) {
       && !route.startsWith('/api/playback-token')
       && !route.startsWith('/api/stream/')
       && route !== '/api/play'
-      && route !== '/api/fixed-episode') {
+      && route !== '/api/fixed-episode'
+      && route !== '/api/movie') {
       next();
       return;
     }
@@ -881,6 +919,82 @@ export function createApp(config) {
         sourceUrl: playbackData.sourceUrl,
         referer: config.pageUrl,
         userAgent: config.userAgent
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/api/movie', async (req, res, next) => {
+    try {
+      const pageUrl = parseFilmixPageUrl(req.query.url);
+      if (!pageUrl) {
+        res.status(400).json({ error: 'Valid filmix.* movie url is required' });
+        return;
+      }
+      const preferredQuality = parseQualityQuery(req.query.quality, 'max');
+      if (!preferredQuality) {
+        res.status(400).json({ error: 'quality must be integer or "max"' });
+        return;
+      }
+      const playerData = await config.filmixClient.getPlayerDataForUrl(pageUrl);
+      const allCandidates = resolveMovieCandidatesFromPlayerData(playerData, {
+        preferredTranslationPattern
+      });
+      if (!allCandidates.length) {
+        res.status(404).json({ error: 'Movie sources are not available for this url' });
+        return;
+      }
+      const targetQuality = preferredQuality === 'max'
+        ? Number.MAX_SAFE_INTEGER
+        : Number.parseInt(preferredQuality, 10);
+      const candidatesPayload = [];
+      for (const candidate of allCandidates) {
+        const variant = pickVariant(candidate.variants, targetQuality);
+        if (!variant || !variant.url) {
+          continue;
+        }
+        const sourceData = {
+          sourceUrl: variant.url,
+          localFilePath: '',
+          origin: 'movie-player-data',
+          sourceKey: buildSourceKey(variant.url)
+        };
+        const quality = Number.isFinite(variant.quality) && variant.quality > 0
+          ? variant.quality
+          : parseSourceQualityFromUrl(variant.url);
+        const descriptor = createPlaybackDescriptor(sourceData);
+        candidatesPayload.push({
+          translationName: candidate.translationName || '',
+          quality,
+          origin: sourceData.origin,
+          sourceKey: sourceData.sourceKey,
+          playbackToken: descriptor.playbackToken,
+          playbackUrl: descriptor.playbackUrl,
+          expiresAt: descriptor.expiresAt,
+          availableQualities: candidate.variants
+            .map((item) => item.quality)
+            .filter((value) => Number.isFinite(value) && value > 0)
+        });
+      }
+      if (!candidatesPayload.length) {
+        res.status(404).json({ error: 'Movie source is not available for requested quality' });
+        return;
+      }
+      const primary = candidatesPayload[0];
+      setSensitiveNoStore(res);
+      res.json({
+        url: pageUrl,
+        title: extractMovieTitle(playerData),
+        translationName: primary.translationName,
+        quality: primary.quality,
+        origin: primary.origin,
+        sourceKey: primary.sourceKey,
+        playbackToken: primary.playbackToken,
+        playbackUrl: primary.playbackUrl,
+        expiresAt: primary.expiresAt,
+        availableQualities: primary.availableQualities,
+        candidates: candidatesPayload
       });
     } catch (error) {
       next(error);

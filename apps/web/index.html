@@ -21,6 +21,31 @@
       </section>
       <section class="controls">
         <div class="row">
+          <label class="label" for="movie-url-input">Filmix movie URL</label>
+          <input
+            id="movie-url-input"
+            class="input"
+            type="url"
+            inputmode="url"
+            placeholder="https://filmix.zip/.../181452-...html"
+            autocomplete="off"
+          />
+        </div>
+        <div class="row">
+          <label class="label" for="movie-quality-select">Movie quality</label>
+          <select id="movie-quality-select" class="input">
+            <option value="max">max</option>
+            <option value="1080">1080p</option>
+            <option value="720">720p</option>
+            <option value="480">480p</option>
+            <option value="min">min (lowest)</option>
+          </select>
+        </div>
+        <button id="movie-play-btn" class="button" type="button">Play movie (English)</button>
+        <p id="movie-status" class="status secondary"></p>
+      </section>
+      <section class="controls">
+        <div class="row">
           <label class="label" for="season-select">Season</label>
           <select id="season-select" class="input"></select>
         </div>

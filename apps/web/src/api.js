@@ -54,6 +54,9 @@ export async function fetchSourceBatch(season, episodes, quality = 'max') {
 export async function fetchSourceLadder(season, episode) {
   return fetchJson('/api/source-ladder', { season, episode });
 }
+export async function fetchMovieByUrl(url, quality = 'max') {
+  return fetchJson('/api/movie', { url, quality });
+}
 export async function fetchPlaybackProgress() {
   return fetchJson('/api/progress');
 }
