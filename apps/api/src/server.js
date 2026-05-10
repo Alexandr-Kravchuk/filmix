@@ -1142,19 +1142,25 @@ export function createApp(config) {
         referer: pageUrl,
         cookie
       });
+      const startedAt = Date.now();
+      let bytesStreamed = 0;
       let killed = false;
-      const killProcess = () => {
+      let killReason = '';
+      process.stdout.write(`[movie-segment] spawn pid=${proc.pid} segment=${segmentIndex} start=${start}s duration=${safeSegmentSeconds}s translation="${candidate.translationName}" quality=${candidate.quality}\n`);
+      const killProcess = (reason) => {
         if (killed || proc.exitCode !== null) {
           return;
         }
         killed = true;
+        killReason = reason || 'unknown';
+        process.stdout.write(`[movie-segment] killing pid=${proc.pid} segment=${segmentIndex} reason=${killReason} elapsed=${Date.now() - startedAt}ms bytes=${bytesStreamed}\n`);
         try {
           proc.kill('SIGKILL');
         } catch {
         }
       };
-      req.on('close', killProcess);
-      res.on('close', killProcess);
+      req.on('close', () => killProcess('req-close'));
+      res.on('close', () => killProcess('res-close'));
       res.status(200);
       setSensitiveNoStore(res);
       res.setHeader('Content-Type', 'video/mp4');
@@ -1163,8 +1169,12 @@ export function createApp(config) {
       res.setHeader('X-Movie-Segment-Index', String(segmentIndex));
       res.setHeader('X-Movie-Segment-Seconds', String(safeSegmentSeconds));
       res.setHeader('X-Movie-Start', String(start));
+      proc.stdout.on('data', (chunk) => {
+        bytesStreamed += chunk.length;
+      });
       proc.stdout.pipe(res);
       proc.on('error', (error) => {
+        process.stdout.write(`[movie-segment] error pid=${proc.pid} segment=${segmentIndex} message=${error && error.message ? error.message : 'unknown'}\n`);
         if (!res.headersSent) {
           res.status(500).json({ error: error && error.message ? error.message : 'ffmpeg spawn failed' });
         } else {
@@ -1174,10 +1184,12 @@ export function createApp(config) {
           }
         }
       });
-      proc.on('close', (code) => {
+      proc.on('close', (code, signal) => {
+        const elapsed = Date.now() - startedAt;
+        const tail = typeof proc.getStderr === 'function' ? proc.getStderr() : '';
+        process.stdout.write(`[movie-segment] close pid=${proc.pid} segment=${segmentIndex} code=${code} signal=${signal} killed=${killed} reason=${killReason} elapsed=${elapsed}ms bytes=${bytesStreamed}${tail ? ` stderr=${tail.slice(-200).replace(/\n/g, ' | ')}` : ''}\n`);
         if (!res.writableEnded) {
-          if (code !== 0 && !res.headersSent) {
-            const tail = typeof proc.getStderr === 'function' ? proc.getStderr() : '';
+          if (code !== 0 && code !== null && !res.headersSent) {
             res.status(500).json({ error: `ffmpeg exited with code ${code}`, stderr: tail.slice(-500) });
             return;
           }

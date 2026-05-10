@@ -1,7 +1,7 @@
 import { remuxEnglishTrack, segmentEnglishTrackFromBlob, getFfmpegLogTail, getFfmpegLastError } from './ffmpeg-engine.js';
 import { createMovieLogUploader } from './movie-log-uploader.js';
 
-const XBOX_SEGMENT_SECONDS = 1200;
+const XBOX_SEGMENT_SECONDS = 3600;
 const DIAGNOSTIC_HISTORY_LIMIT = 80;
 const VIDEO_EVENTS_TO_TRACK = ['loadstart', 'loadedmetadata', 'canplay', 'play', 'playing', 'pause', 'waiting', 'stalled', 'error', 'ended', 'emptied'];
 
