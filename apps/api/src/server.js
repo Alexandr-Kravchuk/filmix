@@ -12,6 +12,7 @@ import { resolveEpisodeSourceFromPlayerData, resolveMovieCandidatesFromPlayerDat
 import { proxyVideoRequest } from './proxy-service.js';
 import { createSourceCacheService } from './source-cache-service.js';
 import { createPlaybackTokenService } from './playback-token-service.js';
+import { createMovieLogService } from './movie-log-service.js';
 
 function loadEnvFiles() {
   dotenv.config({ path: path.resolve(process.cwd(), 'apps/api/.env') });
@@ -284,6 +285,9 @@ export function createApp(config) {
     windowMs: Number.parseInt(String(config.rateLimitWindowMs || '60000'), 10),
     maxRequests: Number.parseInt(String(config.rateLimitMaxRequests || '60'), 10)
   });
+  const movieLogService = config.movieLogService || createMovieLogService({
+    maxEntries: Number.parseInt(String(config.movieLogMaxEntries || '1000'), 10)
+  });
   let cache = null;
   let playbackProgress = null;
   let playbackProgressLoaded = false;
@@ -553,6 +557,7 @@ export function createApp(config) {
 
   app.use(express.json({ limit: '30mb' }));
   app.use('/api/progress', express.text({ type: 'text/plain', limit: '20kb' }));
+  app.use('/api/movie-log', express.text({ type: ['text/plain', 'application/json'], limit: '256kb' }));
 
   app.use((req, res, next) => {
     const origin = req.headers.origin;
@@ -580,7 +585,8 @@ export function createApp(config) {
       && !route.startsWith('/api/stream/')
       && route !== '/api/play'
       && route !== '/api/fixed-episode'
-      && route !== '/api/movie') {
+      && route !== '/api/movie'
+      && route !== '/api/movie-log') {
       next();
       return;
     }
@@ -999,6 +1005,47 @@ export function createApp(config) {
     } catch (error) {
       next(error);
     }
+  });
+
+  app.post('/api/movie-log', (req, res) => {
+    let body = req.body;
+    if (typeof body === 'string') {
+      try {
+        body = JSON.parse(body);
+      } catch {
+        body = null;
+      }
+    }
+    if (!body || typeof body !== 'object') {
+      res.status(400).json({ error: 'Invalid log payload' });
+      return;
+    }
+    const sessionId = String(body.sessionId || '').slice(0, 64);
+    const entries = Array.isArray(body.entries) ? body.entries : [];
+    const sourceIp = String(req.headers['x-forwarded-for'] || req.ip || req.socket.remoteAddress || '').split(',')[0].trim();
+    const sourceUserAgent = String(req.headers['user-agent'] || '');
+    const accepted = movieLogService.append(entries, {
+      sessionId,
+      sourceIp,
+      sourceUserAgent
+    });
+    setSensitiveNoStore(res);
+    res.json({ ok: true, accepted, total: movieLogService.size });
+  });
+  app.get('/api/movie-log', (req, res) => {
+    setSensitiveNoStore(res);
+    if (String(req.query.format || '').toLowerCase() === 'sessions') {
+      res.json({ sessions: movieLogService.listSessions(), total: movieLogService.size });
+      return;
+    }
+    res.json({
+      entries: movieLogService.list({
+        session: String(req.query.session || ''),
+        since: req.query.since,
+        limit: req.query.limit
+      }),
+      total: movieLogService.size
+    });
   });
 
   app.post('/api/admin/import-har', async (req, res, next) => {

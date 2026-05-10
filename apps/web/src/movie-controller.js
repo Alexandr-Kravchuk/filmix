@@ -1,4 +1,5 @@
 import { remuxEnglishTrack, segmentEnglishTrack, getFfmpegLogTail, getFfmpegLastError } from './ffmpeg-engine.js';
+import { createMovieLogUploader } from './movie-log-uploader.js';
 
 const XBOX_SEGMENT_SECONDS = 1200;
 const DIAGNOSTIC_HISTORY_LIMIT = 80;
@@ -120,6 +121,9 @@ export function createMovieController(options) {
     globalListenersAttached: false
   };
   const xboxSafeMode = options.xboxSafeMode === true;
+  const uploader = options.logUploader || createMovieLogUploader({
+    getApiBaseUrl: options.getApiBaseUrl
+  });
   function pushDiagnostic(stage, details = {}) {
     const entry = {
       at: new Date().toISOString(),
@@ -139,6 +143,10 @@ export function createMovieController(options) {
     if (typeof console !== 'undefined' && typeof console.info === 'function') {
       console.info('[movie]', stage, details);
     }
+    try {
+      uploader.append(entry);
+    } catch {
+    }
   }
   function renderDiagnostics() {
     const target = options.elements && options.elements.movieDiagnostics;
@@ -153,7 +161,8 @@ export function createMovieController(options) {
         .join(' ');
       return `${at} ${entry.stage}${rest ? ' ' + rest : ''}`;
     });
-    target.textContent = lines.join('\n');
+    const header = `session: ${uploader.sessionId}`;
+    target.textContent = `${header}\n${lines.join('\n')}`;
   }
   function attachVideoEventListeners() {
     if (state.videoEventListeners) {
@@ -212,6 +221,7 @@ export function createMovieController(options) {
   attachGlobalErrorListeners();
   pushDiagnostic('controller:init', {
     xboxSafeMode,
+    sessionId: uploader.sessionId,
     userAgent: typeof navigator === 'undefined' ? '' : String(navigator.userAgent || '').slice(0, 120),
     deviceMemory: typeof navigator !== 'undefined' && navigator.deviceMemory ? navigator.deviceMemory : null,
     hardwareConcurrency: typeof navigator !== 'undefined' && navigator.hardwareConcurrency ? navigator.hardwareConcurrency : null

@@ -411,6 +411,48 @@ test('uses strict validation for season and episode', async () => {
   await request(app).get('/api/play').query({ season: 1, episode: '1.2' }).expect(400);
 });
 
+test('movie log endpoint accepts json and text payload and lists entries', async () => {
+  const app = createTestApp();
+  await request(app)
+    .post('/api/movie-log')
+    .set('Content-Type', 'application/json')
+    .send({
+      sessionId: 'sess-json',
+      entries: [
+        { stage: 'flow:start', payload: { url: 'https://filmix.zip/x' } },
+        { stage: 'download:start' }
+      ]
+    })
+    .expect(200);
+  await request(app)
+    .post('/api/movie-log')
+    .set('Content-Type', 'text/plain')
+    .send(JSON.stringify({
+      sessionId: 'sess-text',
+      entries: [
+        { stage: 'ffmpeg:segment_start', payload: { candidateIndex: 0 } }
+      ]
+    }))
+    .expect(200);
+  const all = await request(app).get('/api/movie-log').expect(200);
+  assert.equal(all.body.entries.length, 3);
+  assert.equal(all.body.total, 3);
+  const filtered = await request(app).get('/api/movie-log').query({ session: 'sess-text' }).expect(200);
+  assert.deepEqual(filtered.body.entries.map((entry) => entry.stage), ['ffmpeg:segment_start']);
+  const sessions = await request(app).get('/api/movie-log').query({ format: 'sessions' }).expect(200);
+  assert.equal(Array.isArray(sessions.body.sessions), true);
+  assert.equal(sessions.body.sessions.length, 2);
+});
+
+test('movie log endpoint rejects malformed payload', async () => {
+  const app = createTestApp();
+  await request(app)
+    .post('/api/movie-log')
+    .set('Content-Type', 'text/plain')
+    .send('not-json')
+    .expect(400);
+});
+
 test('hides version in health response by default', async () => {
   const appDefault = createTestApp();
   const healthDefault = await request(appDefault).get('/api/health').expect(200);
