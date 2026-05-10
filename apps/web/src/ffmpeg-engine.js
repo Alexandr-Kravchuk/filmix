@@ -119,6 +119,13 @@ function resetFfmpegState(ffmpeg) {
   }
 }
 
+export function getFfmpegLogTail(limit = 30) {
+  const safeLimit = Number.isFinite(Number(limit)) && Number(limit) > 0 ? Math.floor(Number(limit)) : 30;
+  return state.logTail.slice(-safeLimit);
+}
+export function getFfmpegLastError() {
+  return state.lastError || '';
+}
 export function warmupFfmpeg() {
   return enqueue(async () => {
     await ensureLoaded();

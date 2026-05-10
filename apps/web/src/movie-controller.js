@@ -1,6 +1,8 @@
-import { remuxEnglishTrack, segmentEnglishTrack } from './ffmpeg-engine.js';
+import { remuxEnglishTrack, segmentEnglishTrack, getFfmpegLogTail, getFfmpegLastError } from './ffmpeg-engine.js';
 
 const XBOX_SEGMENT_SECONDS = 1200;
+const DIAGNOSTIC_HISTORY_LIMIT = 80;
+const VIDEO_EVENTS_TO_TRACK = ['loadstart', 'loadedmetadata', 'canplay', 'play', 'playing', 'pause', 'waiting', 'stalled', 'error', 'ended', 'emptied'];
 
 const MAX_SOURCE_BYTES = 1024 * 1024 * 1024;
 
@@ -112,9 +114,108 @@ export function createMovieController(options) {
     segments: [],
     segmentIndex: 0,
     segmentSeconds: 0,
-    onSegmentEnded: null
+    onSegmentEnded: null,
+    diagnostics: [],
+    videoEventListeners: null,
+    globalListenersAttached: false
   };
   const xboxSafeMode = options.xboxSafeMode === true;
+  function pushDiagnostic(stage, details = {}) {
+    const entry = {
+      at: new Date().toISOString(),
+      stage,
+      ...details
+    };
+    state.diagnostics.push(entry);
+    while (state.diagnostics.length > DIAGNOSTIC_HISTORY_LIMIT) {
+      state.diagnostics.shift();
+    }
+    renderDiagnostics();
+    try {
+      const stored = JSON.stringify(state.diagnostics).slice(0, 100000);
+      globalThis.localStorage && globalThis.localStorage.setItem('filmix-movie-diagnostics-v1', stored);
+    } catch {
+    }
+    if (typeof console !== 'undefined' && typeof console.info === 'function') {
+      console.info('[movie]', stage, details);
+    }
+  }
+  function renderDiagnostics() {
+    const target = options.elements && options.elements.movieDiagnostics;
+    if (!target) {
+      return;
+    }
+    const lines = state.diagnostics.slice(-30).map((entry) => {
+      const at = entry.at.slice(11, 23);
+      const rest = Object.entries(entry)
+        .filter(([key]) => key !== 'at' && key !== 'stage')
+        .map(([key, value]) => `${key}=${typeof value === 'object' ? JSON.stringify(value) : value}`)
+        .join(' ');
+      return `${at} ${entry.stage}${rest ? ' ' + rest : ''}`;
+    });
+    target.textContent = lines.join('\n');
+  }
+  function attachVideoEventListeners() {
+    if (state.videoEventListeners) {
+      return;
+    }
+    const handlers = {};
+    for (const eventName of VIDEO_EVENTS_TO_TRACK) {
+      const handler = () => {
+        const v = options.elements.video;
+        const error = v && v.error ? `${v.error.code}:${v.error.message || ''}` : null;
+        pushDiagnostic(`video:${eventName}`, {
+          readyState: v ? v.readyState : null,
+          networkState: v ? v.networkState : null,
+          duration: v && Number.isFinite(v.duration) ? Number(v.duration.toFixed(2)) : null,
+          currentTime: v ? Number((v.currentTime || 0).toFixed(2)) : null,
+          paused: v ? v.paused : null,
+          segmentIndex: state.segmentIndex,
+          ...(error ? { error } : {})
+        });
+      };
+      options.elements.video.addEventListener(eventName, handler);
+      handlers[eventName] = handler;
+    }
+    state.videoEventListeners = handlers;
+  }
+  function detachVideoEventListeners() {
+    if (!state.videoEventListeners) {
+      return;
+    }
+    for (const [eventName, handler] of Object.entries(state.videoEventListeners)) {
+      options.elements.video.removeEventListener(eventName, handler);
+    }
+    state.videoEventListeners = null;
+  }
+  function attachGlobalErrorListeners() {
+    if (state.globalListenersAttached) {
+      return;
+    }
+    state.globalListenersAttached = true;
+    globalThis.addEventListener('error', (event) => {
+      pushDiagnostic('window:error', {
+        message: String(event && event.message ? event.message : 'unknown'),
+        filename: String(event && event.filename ? event.filename : ''),
+        lineno: event && event.lineno ? event.lineno : 0
+      });
+    });
+    globalThis.addEventListener('unhandledrejection', (event) => {
+      const reason = event && event.reason;
+      pushDiagnostic('window:unhandledrejection', {
+        message: String(reason && reason.message ? reason.message : reason || 'unknown'),
+        name: String(reason && reason.name ? reason.name : '')
+      });
+    });
+  }
+  attachVideoEventListeners();
+  attachGlobalErrorListeners();
+  pushDiagnostic('controller:init', {
+    xboxSafeMode,
+    userAgent: typeof navigator === 'undefined' ? '' : String(navigator.userAgent || '').slice(0, 120),
+    deviceMemory: typeof navigator !== 'undefined' && navigator.deviceMemory ? navigator.deviceMemory : null,
+    hardwareConcurrency: typeof navigator !== 'undefined' && navigator.hardwareConcurrency ? navigator.hardwareConcurrency : null
+  });
   function setStatus(message, isError = false) {
     if (typeof options.setMovieStatus === 'function') {
       options.setMovieStatus(message, isError);
@@ -163,19 +264,24 @@ export function createMovieController(options) {
   async function playSegmentAt(index, movieTitle, translationName) {
     const total = state.segments.length;
     if (index < 0 || index >= total) {
+      pushDiagnostic('segment:out_of_range', { index, total });
       return;
     }
     state.segmentIndex = index;
     releaseBlob();
-    state.blobUrl = URL.createObjectURL(state.segments[index]);
+    const segmentBlob = state.segments[index];
+    state.blobUrl = URL.createObjectURL(segmentBlob);
+    pushDiagnostic('segment:load', { index, total, bytes: segmentBlob.size, url: state.blobUrl.slice(0, 60) });
     options.elements.video.src = state.blobUrl;
     options.elements.video.load();
     const partLabel = `part ${index + 1}/${total} (${formatSegmentRange(index)})`;
     try {
       await options.elements.video.play();
+      pushDiagnostic('segment:play_started', { index });
       const translationLabel = translationName ? ` from ${translationName}` : '';
       setStatus(`Playing ${movieTitle} ${partLabel} in English${translationLabel}`);
-    } catch {
+    } catch (playError) {
+      pushDiagnostic('segment:play_blocked', { index, name: playError && playError.name, message: playError && playError.message });
       setStatus(`Autoplay blocked on ${partLabel}. Click Play in the player to continue.`, true);
     }
   }
@@ -183,6 +289,7 @@ export function createMovieController(options) {
     detachSegmentEndedListener();
     state.onSegmentEnded = () => {
       const next = state.segmentIndex + 1;
+      pushDiagnostic('segment:ended', { current: state.segmentIndex, next, total: state.segments.length });
       if (next >= state.segments.length) {
         setStatus(`Finished ${movieTitle} (${state.segments.length} parts)`);
         return;
@@ -200,6 +307,8 @@ export function createMovieController(options) {
       setStatus('Paste a Filmix movie URL first', true);
       return;
     }
+    state.diagnostics = [];
+    pushDiagnostic('flow:start', { url: url.slice(0, 120), xboxSafeMode });
     let parsed;
     try {
       parsed = new URL(url);
@@ -219,11 +328,18 @@ export function createMovieController(options) {
     options.setProgress(0);
     options.setProgressText('');
     try {
+      pushDiagnostic('api:request', { quality });
       const payload = await options.fetchMovieByUrl(url, quality);
       if (requestId !== state.requestId) {
         return;
       }
       const candidates = collectCandidates(payload);
+      pushDiagnostic('api:response', {
+        title: (payload && payload.title) || '',
+        candidates: candidates.length,
+        primaryTranslation: candidates[0] && candidates[0].translationName,
+        primaryQuality: candidates[0] && candidates[0].quality
+      });
       if (!candidates.length) {
         throw new Error('Movie playback URL is missing');
       }
@@ -243,6 +359,7 @@ export function createMovieController(options) {
         const candidateLabel = candidates.length > 1 ? ` [${index + 1}/${candidates.length}]` : '';
         setStatus(`Downloading${translation}${qualityLabel}${candidateLabel}...`);
         const candidateUrl = resolvePlaybackUrl(candidate.playbackUrl, options.getApiBaseUrl());
+        pushDiagnostic('download:start', { candidateIndex: index, translation: candidate.translationName, quality: candidate.quality });
         let sourceBytes;
         try {
           sourceBytes = await downloadSource(candidateUrl, (progress) => {
@@ -252,7 +369,9 @@ export function createMovieController(options) {
             options.setProgress(0.05 + progress * 0.5);
             options.setProgressText(`${Math.round(progress * 100)}% downloading${candidateLabel}`);
           });
+          pushDiagnostic('download:done', { candidateIndex: index, bytes: sourceBytes.length });
         } catch (downloadError) {
+          pushDiagnostic('download:failed', { candidateIndex: index, name: downloadError && downloadError.name, message: downloadError && downloadError.message });
           lastError = downloadError;
           continue;
         }
@@ -263,6 +382,7 @@ export function createMovieController(options) {
         setStatus(`Extracting English audio track${translation}${candidateLabel}...`);
         try {
           if (xboxSafeMode) {
+            pushDiagnostic('ffmpeg:segment_start', { candidateIndex: index, segmentSeconds: XBOX_SEGMENT_SECONDS });
             segmentResult = await segmentEnglishTrack(
               sourceBytes,
               (progress) => {
@@ -274,7 +394,13 @@ export function createMovieController(options) {
               },
               { releaseAfter: true, segmentSeconds: XBOX_SEGMENT_SECONDS }
             );
+            pushDiagnostic('ffmpeg:segment_done', {
+              candidateIndex: index,
+              segments: segmentResult.segments.length,
+              totalBytes: segmentResult.segments.reduce((sum, bytes) => sum + bytes.length, 0)
+            });
           } else {
+            pushDiagnostic('ffmpeg:remux_start', { candidateIndex: index });
             outputBytes = await remuxEnglishTrack(
               sourceBytes,
               (progress) => {
@@ -286,10 +412,18 @@ export function createMovieController(options) {
               },
               { releaseAfter: false }
             );
+            pushDiagnostic('ffmpeg:remux_done', { candidateIndex: index, bytes: outputBytes.length });
           }
           usedCandidate = candidate;
           break;
         } catch (remuxError) {
+          pushDiagnostic('ffmpeg:failed', {
+            candidateIndex: index,
+            name: remuxError && remuxError.name,
+            message: remuxError && remuxError.message,
+            ffmpegLastError: getFfmpegLastError(),
+            ffmpegTail: getFfmpegLogTail(8)
+          });
           lastError = remuxError;
           if (!isMissingEnglishTrackError(remuxError)) {
             throw remuxError;
@@ -307,6 +441,11 @@ export function createMovieController(options) {
       if (segmentResult) {
         state.segments = segmentResult.segments.map((bytes) => new Blob([bytes], { type: 'video/mp4' }));
         state.segmentSeconds = segmentResult.segmentSeconds;
+        pushDiagnostic('segments:ready', {
+          count: state.segments.length,
+          segmentSeconds: state.segmentSeconds,
+          sizes: state.segments.map((blob) => blob.size)
+        });
         attachSegmentEndedListener(movieTitle, translationName);
         await playSegmentAt(0, movieTitle, translationName);
         options.setProgress(1);
@@ -332,6 +471,12 @@ export function createMovieController(options) {
         return;
       }
       const message = error && error.message ? error.message : 'Cannot prepare movie';
+      pushDiagnostic('flow:error', {
+        name: error && error.name,
+        message,
+        ffmpegLastError: getFfmpegLastError(),
+        ffmpegTail: getFfmpegLogTail(12)
+      });
       setStatus(message, true);
       options.setProgress(0);
       options.setProgressText('');

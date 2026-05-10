@@ -126,7 +126,8 @@ const elements = {
   movieUrlInput: document.getElementById('movie-url-input'),
   movieQualitySelect: document.getElementById('movie-quality-select'),
   moviePlayButton: document.getElementById('movie-play-btn'),
-  movieStatus: document.getElementById('movie-status')
+  movieStatus: document.getElementById('movie-status'),
+  movieDiagnostics: document.getElementById('movie-diagnostics')
 };
 const state = {
   isBusy: false,
