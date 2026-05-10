@@ -13,6 +13,7 @@ import { proxyVideoRequest } from './proxy-service.js';
 import { createSourceCacheService } from './source-cache-service.js';
 import { createPlaybackTokenService } from './playback-token-service.js';
 import { createMovieLogService } from './movie-log-service.js';
+import { probeMovieDuration, spawnEnglishSegmentStream } from './movie-streaming-service.js';
 
 function loadEnvFiles() {
   dotenv.config({ path: path.resolve(process.cwd(), 'apps/api/.env') });
@@ -1007,6 +1008,176 @@ export function createApp(config) {
     }
   });
 
+  async function resolveMovieCandidates(pageUrl, preferredQuality) {
+    const playerData = await config.filmixClient.getPlayerDataForUrl(pageUrl);
+    const allCandidates = resolveMovieCandidatesFromPlayerData(playerData, {
+      preferredTranslationPattern
+    });
+    if (!allCandidates.length) {
+      const error = new Error('Movie sources are not available for this url');
+      error.statusCode = 404;
+      throw error;
+    }
+    const targetQuality = preferredQuality === 'max'
+      ? Number.MAX_SAFE_INTEGER
+      : Number.parseInt(preferredQuality, 10);
+    const resolved = [];
+    for (const candidate of allCandidates) {
+      const variant = pickVariant(candidate.variants, targetQuality);
+      if (!variant || !variant.url) {
+        continue;
+      }
+      const quality = Number.isFinite(variant.quality) && variant.quality > 0
+        ? variant.quality
+        : parseSourceQualityFromUrl(variant.url);
+      resolved.push({
+        translationName: candidate.translationName || '',
+        sourceUrl: variant.url,
+        quality,
+        availableQualities: candidate.variants
+          .map((item) => item.quality)
+          .filter((value) => Number.isFinite(value) && value > 0)
+      });
+    }
+    if (!resolved.length) {
+      const error = new Error('Movie source is not available for requested quality');
+      error.statusCode = 404;
+      throw error;
+    }
+    return { playerData, candidates: resolved };
+  }
+  app.get('/api/movie-meta', async (req, res, next) => {
+    try {
+      const pageUrl = parseFilmixPageUrl(req.query.url);
+      if (!pageUrl) {
+        res.status(400).json({ error: 'Valid filmix.* movie url is required' });
+        return;
+      }
+      const preferredQuality = parseQualityQuery(req.query.quality, 'max');
+      if (!preferredQuality) {
+        res.status(400).json({ error: 'quality must be integer or "max"' });
+        return;
+      }
+      const segmentSeconds = Number.parseInt(String(req.query.segmentSeconds || '1200'), 10);
+      const safeSegmentSeconds = Number.isFinite(segmentSeconds) && segmentSeconds >= 60 && segmentSeconds <= 3600
+        ? segmentSeconds
+        : 1200;
+      const { playerData, candidates } = await resolveMovieCandidates(pageUrl, preferredQuality);
+      const cookie = (config.filmixClient && typeof config.filmixClient.getCookieHeader === 'function')
+        ? config.filmixClient.getCookieHeader()
+        : '';
+      const probe = await probeMovieDuration(candidates[0].sourceUrl, {
+        userAgent: config.userAgent,
+        referer: pageUrl,
+        cookie
+      });
+      const segmentCount = Math.max(1, Math.ceil(probe.duration / safeSegmentSeconds));
+      setSensitiveNoStore(res);
+      res.json({
+        url: pageUrl,
+        title: extractMovieTitle(playerData),
+        duration: Number(probe.duration.toFixed(3)),
+        segmentSeconds: safeSegmentSeconds,
+        segmentCount,
+        primary: {
+          translationName: candidates[0].translationName,
+          quality: candidates[0].quality
+        },
+        candidates: candidates.map((item) => ({
+          translationName: item.translationName,
+          quality: item.quality,
+          availableQualities: item.availableQualities
+        }))
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+  app.get('/api/movie-segment', async (req, res, next) => {
+    try {
+      const pageUrl = parseFilmixPageUrl(req.query.url);
+      if (!pageUrl) {
+        res.status(400).json({ error: 'Valid filmix.* movie url is required' });
+        return;
+      }
+      const preferredQuality = parseQualityQuery(req.query.quality, 'max');
+      if (!preferredQuality) {
+        res.status(400).json({ error: 'quality must be integer or "max"' });
+        return;
+      }
+      const segmentIndex = Number.parseInt(String(req.query.segment || '0'), 10);
+      if (!Number.isFinite(segmentIndex) || segmentIndex < 0) {
+        res.status(400).json({ error: 'segment must be a non-negative integer' });
+        return;
+      }
+      const segmentSeconds = Number.parseInt(String(req.query.segmentSeconds || '1200'), 10);
+      const safeSegmentSeconds = Number.isFinite(segmentSeconds) && segmentSeconds >= 60 && segmentSeconds <= 3600
+        ? segmentSeconds
+        : 1200;
+      const candidateIndex = Math.max(0, Number.parseInt(String(req.query.candidate || '0'), 10) || 0);
+      const { candidates } = await resolveMovieCandidates(pageUrl, preferredQuality);
+      const candidate = candidates[Math.min(candidateIndex, candidates.length - 1)];
+      const cookie = (config.filmixClient && typeof config.filmixClient.getCookieHeader === 'function')
+        ? config.filmixClient.getCookieHeader()
+        : '';
+      const start = segmentIndex * safeSegmentSeconds;
+      const proc = spawnEnglishSegmentStream(candidate.sourceUrl, {
+        start,
+        duration: safeSegmentSeconds,
+        userAgent: config.userAgent,
+        referer: pageUrl,
+        cookie
+      });
+      let killed = false;
+      const killProcess = () => {
+        if (killed || proc.exitCode !== null) {
+          return;
+        }
+        killed = true;
+        try {
+          proc.kill('SIGKILL');
+        } catch {
+        }
+      };
+      req.on('close', killProcess);
+      res.on('close', killProcess);
+      res.status(200);
+      setSensitiveNoStore(res);
+      res.setHeader('Content-Type', 'video/mp4');
+      res.setHeader('X-Movie-Translation', encodeURIComponent(candidate.translationName));
+      res.setHeader('X-Movie-Quality', String(candidate.quality));
+      res.setHeader('X-Movie-Segment-Index', String(segmentIndex));
+      res.setHeader('X-Movie-Segment-Seconds', String(safeSegmentSeconds));
+      res.setHeader('X-Movie-Start', String(start));
+      proc.stdout.pipe(res);
+      proc.on('error', (error) => {
+        if (!res.headersSent) {
+          res.status(500).json({ error: error && error.message ? error.message : 'ffmpeg spawn failed' });
+        } else {
+          try {
+            res.end();
+          } catch {
+          }
+        }
+      });
+      proc.on('close', (code) => {
+        if (!res.writableEnded) {
+          if (code !== 0 && !res.headersSent) {
+            const tail = typeof proc.getStderr === 'function' ? proc.getStderr() : '';
+            res.status(500).json({ error: `ffmpeg exited with code ${code}`, stderr: tail.slice(-500) });
+            return;
+          }
+          try {
+            res.end();
+          } catch {
+          }
+        }
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.post('/api/movie-log', (req, res) => {
     let body = req.body;
     if (typeof body === 'string') {
@@ -1123,7 +1294,8 @@ export function createRuntimeConfig() {
 if (import.meta.url === `file://${process.argv[1]}`) {
   const config = createRuntimeConfig();
   const app = createApp(config);
-  app.listen(config.port, () => {
-    process.stdout.write(`API listening on http://localhost:${config.port}\n`);
+  const host = String(process.env.HOST || '0.0.0.0');
+  app.listen(config.port, host, () => {
+    process.stdout.write(`API listening on http://${host}:${config.port}\n`);
   });
 }

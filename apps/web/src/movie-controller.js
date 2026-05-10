@@ -352,6 +352,79 @@ export function createMovieController(options) {
     };
     options.elements.video.addEventListener('ended', state.onSegmentEnded);
   }
+  async function playMovieViaServerStreaming(url, quality, requestId) {
+    pushDiagnostic('xbox:meta_start', { quality, segmentSeconds: XBOX_SEGMENT_SECONDS });
+    setStatus('Probing duration on local server...');
+    const meta = await options.fetchMovieMeta(url, quality, XBOX_SEGMENT_SECONDS);
+    if (requestId !== state.requestId) {
+      return;
+    }
+    const segmentCount = Number.isFinite(Number(meta && meta.segmentCount)) && Number(meta.segmentCount) > 0
+      ? Math.floor(Number(meta.segmentCount))
+      : 1;
+    const segmentSeconds = Number.isFinite(Number(meta && meta.segmentSeconds)) && Number(meta.segmentSeconds) > 0
+      ? Math.floor(Number(meta.segmentSeconds))
+      : XBOX_SEGMENT_SECONDS;
+    const movieTitle = meta && meta.title ? meta.title : 'movie';
+    const primaryTranslation = meta && meta.primary && meta.primary.translationName ? meta.primary.translationName : '';
+    pushDiagnostic('xbox:meta_done', {
+      duration: meta && meta.duration,
+      segmentCount,
+      segmentSeconds,
+      translation: primaryTranslation,
+      candidates: Array.isArray(meta && meta.candidates) ? meta.candidates.length : 0
+    });
+    clearSegments();
+    state.segments = Array.from({ length: segmentCount }, (_, index) => ({
+      url: options.buildMovieSegmentUrl({
+        url,
+        quality,
+        segment: index,
+        segmentSeconds,
+        candidate: 0
+      }),
+      index,
+      seconds: segmentSeconds
+    }));
+    state.segmentSeconds = segmentSeconds;
+    detachSegmentEndedListener();
+    state.onSegmentEnded = () => {
+      const next = state.segmentIndex + 1;
+      pushDiagnostic('xbox:segment_ended', { current: state.segmentIndex, next, total: state.segments.length });
+      if (next >= state.segments.length) {
+        setStatus(`Finished ${movieTitle} (${state.segments.length} parts)`);
+        return;
+      }
+      void playServerSegmentAt(next, movieTitle, primaryTranslation);
+    };
+    options.elements.video.addEventListener('ended', state.onSegmentEnded);
+    options.setProgress(1);
+    options.setProgressText(`Streaming via local server • ${segmentCount} parts × ~${Math.round(segmentSeconds / 60)} min`);
+    await playServerSegmentAt(0, movieTitle, primaryTranslation);
+  }
+  async function playServerSegmentAt(index, movieTitle, translationName) {
+    const total = state.segments.length;
+    if (index < 0 || index >= total) {
+      pushDiagnostic('xbox:segment_out_of_range', { index, total });
+      return;
+    }
+    state.segmentIndex = index;
+    releaseBlob();
+    const entry = state.segments[index];
+    const partLabel = `part ${index + 1}/${total} (${formatSegmentRange(index)})`;
+    pushDiagnostic('xbox:segment_load', { index, total, url: String(entry.url).slice(0, 120) });
+    options.elements.video.src = entry.url;
+    options.elements.video.load();
+    try {
+      await options.elements.video.play();
+      pushDiagnostic('xbox:segment_play_started', { index });
+      const translationLabel = translationName ? ` from ${translationName}` : '';
+      setStatus(`Playing ${movieTitle} ${partLabel} in English${translationLabel}`);
+    } catch (playError) {
+      pushDiagnostic('xbox:segment_play_blocked', { index, name: playError && playError.name, message: playError && playError.message });
+      setStatus(`Autoplay blocked on ${partLabel}. Click Play in the player to continue.`, true);
+    }
+  }
   async function playSelectedMovie() {
     if (state.isBusy) {
       return;
@@ -381,6 +454,25 @@ export function createMovieController(options) {
     setStatus('Resolving Filmix sources...');
     options.setProgress(0);
     options.setProgressText('');
+    if (xboxSafeMode) {
+      try {
+        await playMovieViaServerStreaming(url, quality, requestId);
+      } catch (error) {
+        if (requestId !== state.requestId) {
+          return;
+        }
+        const message = error && error.message ? error.message : 'Cannot prepare movie';
+        pushDiagnostic('flow:error', { name: error && error.name, message });
+        setStatus(message, true);
+        options.setProgress(0);
+        options.setProgressText('');
+      } finally {
+        if (requestId === state.requestId) {
+          setBusy(false);
+        }
+      }
+      return;
+    }
     try {
       pushDiagnostic('api:request', { quality });
       const payload = await options.fetchMovieByUrl(url, quality);

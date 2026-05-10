@@ -1,5 +1,26 @@
 const envBase = typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env.VITE_API_BASE_URL : undefined;
-const apiBaseUrl = (envBase || 'http://localhost:3000').replace(/\/$/, '');
+const defaultBase = (envBase || 'http://localhost:3000').replace(/\/$/, '');
+
+function readQueryOverride() {
+  try {
+    if (typeof globalThis.location === 'undefined') {
+      return '';
+    }
+    const url = new URL(globalThis.location.href);
+    const value = url.searchParams.get('api');
+    if (!value) {
+      return '';
+    }
+    const trimmed = value.trim().replace(/\/$/, '');
+    if (!/^https?:\/\//i.test(trimmed)) {
+      return '';
+    }
+    return trimmed;
+  } catch {
+    return '';
+  }
+}
+const apiBaseUrl = readQueryOverride() || defaultBase;
 
 export function getApiBaseUrl() {
   return apiBaseUrl;
@@ -56,6 +77,19 @@ export async function fetchSourceLadder(season, episode) {
 }
 export async function fetchMovieByUrl(url, quality = 'max') {
   return fetchJson('/api/movie', { url, quality });
+}
+export async function fetchMovieMeta(url, quality = 'min', segmentSeconds = 1200) {
+  return fetchJson('/api/movie-meta', { url, quality, segmentSeconds });
+}
+export function buildMovieSegmentUrl({ url, quality = 'min', segment = 0, segmentSeconds = 1200, candidate = 0 }) {
+  const target = makeApiUrl('/api/movie-segment', {
+    url,
+    quality,
+    segment,
+    segmentSeconds,
+    candidate
+  });
+  return target.toString();
 }
 export async function fetchPlaybackProgress() {
   return fetchJson('/api/progress');

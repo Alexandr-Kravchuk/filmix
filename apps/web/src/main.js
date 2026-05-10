@@ -1,5 +1,5 @@
 import './styles.css';
-import { fetchShow, fetchSourceByEpisode, fetchSourceBatch, fetchSourceLadder, fetchMovieByUrl, fetchPlaybackProgress, savePlaybackProgress, sendPlaybackProgressBeacon, getApiBaseUrl } from './api.js';
+import { fetchShow, fetchSourceByEpisode, fetchSourceBatch, fetchSourceLadder, fetchMovieByUrl, fetchMovieMeta, buildMovieSegmentUrl, fetchPlaybackProgress, savePlaybackProgress, sendPlaybackProgressBeacon, getApiBaseUrl } from './api.js';
 import { readShowCache, writeShowCache, clearShowCache } from './show-cache.js';
 import { createCatalogController } from './catalog-controller.js';
 import { createTaskQueue } from './task-queue.js';
@@ -366,6 +366,8 @@ const progressSync = createProgressSyncController({
 const movie = createMovieController({
   elements,
   fetchMovieByUrl,
+  fetchMovieMeta,
+  buildMovieSegmentUrl,
   getApiBaseUrl,
   setMovieStatus,
   setProgress,
